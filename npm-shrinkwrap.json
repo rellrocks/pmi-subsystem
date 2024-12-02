@@ -1,0 +1,16 @@
+{
+  "name": "pmi-subsystem",
+  "lockfileVersion": 2,
+  "requires": true,
+  "packages": {
+    "": {
+      "dependencies": {
+        "bootstrap-sass": "^3.0.0",
+        "laravel-elixir": "^5.0.0"
+      },
+      "devDependencies": {
+        "gulp": "^3.9.1"
+      }
+    }
+  }
+}

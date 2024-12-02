@@ -1,0 +1,133 @@
+<?php
+/*******************************************************************************
+Copyright (c) <Company Name> All rights reserved.
+
+FILE NAME: wbsinventory.blade.php
+MODULE NAME:  [3039] WBS Inventory
+CREATED BY: AK.DELAROSA
+DATE CREATED: 2018.05.29
+REVISION HISTORY :
+
+VERSION     ROUND    DATE           PIC          DESCRIPTION
+100-00-01   1     2018.05.29     AK.DELAROSA      Initial Draft
+ *******************************************************************************/
+?>
+
+@extends('layouts.master')
+
+@section('title')
+WBS Inventory | Pricon Microelectronics, Inc.
+@endsection
+
+@section('content')
+
+<?php $state = "";
+$readonly = "";?>
+@foreach ($userProgramAccess as $access)
+@if ($access->program_code == Config::get('constants.MODULE_WBS_INV'))
+@if ($access->read_write == "2")
+<?php $state = "disabled";
+$readonly = "readonly";?>
+@endif
+@endif
+@endforeach
+
+
+<div class="page-content">
+    <div class="row">
+        <div class="col-md-12">
+            <!-- BEGIN EXAMPLE TABLE PORTLET-->
+            @include('includes.message-block')
+
+            <div class="portlet box blue">
+                <div class="portlet-title">
+                    <div class="caption">
+                        <i class="fa fa-navicon"></i> WBS Inventory
+                    </div>
+                </div>
+                <div class="portlet-body">
+
+                    <div class="row">
+                        <div class="col-md-12">
+                            <div class="row" style="margin-bottom:20px;">
+                                <div class="col-lg-12 col-md-12 col-sm-12 col-xs-12">
+                                    <div class="btn-group pull-right">
+                                        <a id="btn_search" class="btn btn-sm blue input-sm">
+                                            <i class="fa fa-search"></i> Search
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                            <table class="table table-striped" id="tbl_inventory">
+                                <thead>
+                                    <tr>
+                                        <td>
+                                            <input type="checkbox" name="check_all" class="check_all" id="check_all">
+                                        </td>
+                                        <td>Receiving Control #</td>
+                                        <td>Invoice No.</td>
+                                        <td>Item Code</td>
+                                        <td>Description</td>
+                                        <td>Qty.</td>
+                                        <td>Lot No.</td>
+                                        <td>Location</td>
+                                        <td>Supplier</td>
+                                        <td>IQC Status</td>
+                                        <td>Received By</td>
+                                        <td>Received Date</td>
+                                        <td>Updated By</td>
+                                        <td>Last Update</td>
+                                        <td></td>
+                                    </tr>
+                                </thead>
+                                <tbody id="tbl_inventory_body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-12 text-center">
+                            <button class="btn btn-sm green" id="btn_refresh">
+                    			<i class="fa fa-refresh"></i> Refresh Inventory
+                    		</button>
+
+                            <button class="btn btn-sm red" id="btn_delete" {{ $state }}>
+                                <i class="fa fa-trash"></i> Delete
+                            </button>
+
+                            <a href="{{url('/wbs-inventory-excel')}}" class="btn btn-sm grey-gallery">
+                                <i class="fa fa-file-excel-o"></i> Export to Excel
+                            </a>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+@include('includes.wbs.wbsinventory_modal')
+@include('includes.modals')
+
+
+@endsection
+
+@push('script')
+<script>
+var token = '{{ Session::token() }}';
+var inventoryListURL = "{{ url('/wbs-inventory-list') }}";
+var inventorySearchURL = "{{ url('/wbs-inventory-search') }}";
+var refreshInventoryURL = "{{ url('/wbs-inventory-refresh') }}";
+
+var deleteselected = "{{ url('/wbs-inventory-delete') }}";
+var getPartcodeSearchURL = "{{url('/iqcdbgetitemsearch')}}";
+var searchItemInspectionURL = "{{url('/iqcdbsearchinspection')}}";
+var access_state = "{{ $pgaccess }}";
+var pcode = "{{ $pgcode }}";
+
+</script>
+<script src="{{ asset(Config::get('constants.PUBLIC_PATH').'assets/global/scripts/common.js') }}" type="text/javascript"></script>
+<script src="{{ asset(Config::get('constants.PUBLIC_PATH').'assets/global/scripts/wbs/wbsinventory.js').'?v='.date('YmdHis') }}" type="text/javascript"></script>
+@endpush

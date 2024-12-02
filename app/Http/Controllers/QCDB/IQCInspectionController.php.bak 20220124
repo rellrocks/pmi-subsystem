@@ -1,0 +1,4182 @@
+<?php
+namespace App\Http\Controllers\QCDB;
+
+use App\Http\Controllers\Controller;
+use App\Http\Controllers\CommonController;
+use DB;
+use Config;
+use Yajra\Datatables\Datatables;
+use Illuminate\Support\Facades\Auth; #Auth facade
+use Dompdf\Dompdf;
+use Carbon\Carbon;
+use PDF;
+use App\IQCInspection;
+use Illuminate\Http\Request;
+use App\Http\Requests;
+use Excel;
+use Event;
+use App\Events\UpdateIQCInspection;
+use Illuminate\Support\Str;
+
+class IQCInspectionController extends Controller
+{
+    protected $mysql;
+    protected $mssql;
+    protected $common;
+    protected $com;
+    protected $wbs;
+
+    public function __construct()
+    {
+        $this->middleware('auth');
+        $this->com = new CommonController;
+
+        if (Auth::user() != null) {
+            $this->mysql = $this->com->userDBcon(Auth::user()->productline,'mysql');
+            $this->wbs = $this->com->userDBcon(Auth::user()->productline,'wbs');
+            $this->mssql = $this->com->userDBcon(Auth::user()->productline,'mssql');
+            $this->common = $this->com->userDBcon(Auth::user()->productline,'common');
+        } else {
+            return redirect('/');
+        }
+    }
+
+    public function getIQCInspection(Request $request)
+    {
+        if(!$this->com->getAccessRights(Config::get('constants.MODULE_CODE_IQCDB'), $userProgramAccess))
+        {
+            return redirect('/home');
+        }
+        else
+        {
+
+            return view('qcdb.iqcinspection',[
+                        'userProgramAccess' => $userProgramAccess]);
+        }
+    }
+
+    public function getInvoiceItems(Request $req)
+    {
+        $results = [];
+        $val = (!isset($req->q))? "" : $req->q;
+        $id = (!isset($req->id))? "" : $req->id;
+        $text = (!isset($req->text))? "" : $req->text;
+        $table = (!isset($req->table))? "" : $req->table;
+        $condition = (!isset($req->condition))? "" : $req->condition;
+        $isDistinct = (!isset($req->isDistinct))? "" : $req->isDistinct;
+        $display = (!isset($req->display))? "" : $req->display;
+        $addOptionVal = (!isset($req->addOptionVal))? "" : $req->addOptionVal;
+        $addOptionText = (!isset($req->addOptionText))? "" : $req->addOptionText;
+        $sql_query = (!isset($req->sql_query))? "" : $req->sql_query;
+        $orderBy = (!isset($req->orderBy))? "" : $req->orderBy;
+
+        try {
+            if ($addOptionVal != "" && $display == "id&text") {
+                array_push($results, [
+                    'id' => $addOptionVal,
+                    'text' => $addOptionText
+                ]);
+            }
+
+            if ($sql_query == null || $sql_query == "") {
+                   $sql_query = "SELECT DISTINCT m.item as id, m.item as `text`
+                                FROM tbl_wbs_material_receiving_batch as m
+                                WHERE m.not_for_iqc = 0
+                                AND m.invoice_no = '".$req->invoiceno."'
+                                UNION
+                                SELECT DISTINCT l.item as id, l.item as `text`
+                                FROM tbl_wbs_local_receiving_batch as l
+                                WHERE l.not_for_iqc = 0
+                                AND l.invoice_no = '".$req->invoiceno."'"; 
+                                //AND (l.judgement is null OR l.judgement = '' OR l.judgement = 'On-going')
+            
+            }
+            
+            $db = DB::connection($this->wbs)->select($sql_query);
+
+            foreach ($db as $key => $d) {
+                array_push($results, [
+                    'id' => $d->id,
+                    'text' => $d->text
+                ]);
+            }
+
+        } catch(\Exemption $e) {
+            return [
+                'success' => false,
+                'msessage' => $e->getMessage()
+            ];
+        }
+        
+        return $results;
+    }
+
+    public function getInvoiceItemLotNo(Request $req)
+    {
+        $results = [];
+        $val = (!isset($req->q))? "" : $req->q;
+        $id = (!isset($req->id))? "" : $req->id;
+        $text = (!isset($req->text))? "" : $req->text;
+        $table = (!isset($req->table))? "" : $req->table;
+        $condition = (!isset($req->condition))? "" : $req->condition;
+        $isDistinct = (!isset($req->isDistinct))? "" : $req->isDistinct;
+        $display = (!isset($req->display))? "" : $req->display;
+        $addOptionVal = (!isset($req->addOptionVal))? "" : $req->addOptionVal;
+        $addOptionText = (!isset($req->addOptionText))? "" : $req->addOptionText;
+        $sql_query = (!isset($req->sql_query))? "" : $req->sql_query;
+        $orderBy = (!isset($req->orderBy))? "" : $req->orderBy;
+        $invoiceno = (!isset($req->invoiceno))? "" : $req->invoiceno;
+        $partcode = (!isset($req->partcode))? "" : $req->partcode;
+        $mode = (!isset($req->mode))? "" : $req->mode;
+        $iqc_id = (!isset($req->iqc_id))? "" : $req->iqc_id;
+
+        try {
+            if ($addOptionVal != "" && $display == "id&text") {
+                array_push($results, [
+                    'id' => $addOptionVal,
+                    'text' => $addOptionText,
+                    'mr_id' => '',
+                    'inv_id' => '',
+                    'qty' => 0
+                ]);
+            }
+
+            if ($sql_query == null || $sql_query == "") {
+                    
+            }
+
+            if ($mode == 'disposition') {
+                $iqc = DB::connection($this->mysql)->table("iqc_inspections")->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))->where("id", $iqc_id)->select('lot_no')->first();
+                $lot = ($iqc->lot_no == null)? "": $iqc->lot_no;
+                $arr_lot = explode(',',$lot);
+
+                $iqc_lot_no = "'".implode("','", $arr_lot)."'";
+
+
+                $sql_query = "select l.lot_no as id,
+                                    l.lot_no as `text`,
+                                    l.qty as qty,
+                                    l.id as mr_id,
+                                    (select id from tbl_wbs_inventory where loc_batch_id = l.id limit 1) as inv_id,
+                                    'LR' as `source`
+                                    from tbl_wbs_local_receiving_batch as l
+                                    where l.invoice_no = '" . $invoiceno . "'
+                                    and l.item = '" . $partcode . "'
+                                    and l.lot_no in(".$iqc_lot_no.")
+                                    union
+                                    select m.lot_no as id,
+                                    m.lot_no as `text`,
+                                    m.qty as qty,
+                                    m.id as mr_id,
+                                    (select id from tbl_wbs_inventory where mat_batch_id = m.id limit 1) as inv_id,
+                                    'MR' as `source`
+                                    from tbl_wbs_material_receiving_batch as m
+                                    where m.invoice_no = '" . $invoiceno . "'
+                                    and m.item = '" . $partcode . "'
+                                    and m.lot_no in(".$iqc_lot_no.")";
+
+                $db = DB::connection($this->wbs)->select($sql_query);
+            } else {
+                $db = DB::connection($this->wbs)->select($sql_query);
+            }
+
+            foreach ($db as $key => $d) {
+                array_push($results, [
+                    'id' => $d->id,
+                    'text' => $d->text,
+                    'mr_id' => $d->mr_id,
+                    'inv_id' => $d->inv_id,
+                    'qty' => $d->qty
+                ]);
+            }
+
+        } catch(\Exemption $e) {
+            return [
+                'success' => false,
+                'msessage' => $e->getMessage()
+            ];
+        }
+        
+        return $results;
+    }
+
+    public function getInvoiceItemDetails(Request $req)
+    {
+        // $details = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch as b')
+        //         ->join('tbl_wbs_material_receiving as m','m.receive_no','=','b.wbs_mr_id')
+        //         ->select('b.item_desc',
+        //                 'b.supplier',
+        //                 'm.app_time',
+        //                 'm.app_date',
+        //                 'm.receive_no',
+        //                 DB::raw("SUM(qty) as lot_qty"))
+        //         ->where('m.invoice_no',$req->invoiceno)
+        //         ->where('b.item',$req->item)
+        //         ->first();
+
+        $data = [
+                'lot' => [],
+                'details' => []
+            ];
+
+        $iqc_id = $req->iqc_id;
+
+        $details = DB::connection($this->mysql)
+                        ->select("SELECT partname as item_desc,
+                                        supplier as supplier,
+                                        app_time as app_time,
+                                        app_date as app_date,
+                                        app_no as receive_no,
+                                        lot_qty as lot_qty
+                                FROM iqc_inspections
+                                WHERE id='".$iqc_id."'");
+
+        if (count($details) < 1) {
+            $details = DB::connection($this->wbs)
+                            ->select("SELECT il.item_desc as item_desc,
+                                            il.supplier as supplier,
+                                            l.app_time as app_time,
+                                            l.app_date as app_date,
+                                            l.receive_no as receive_no,
+                                            SUM(lb.qty) as lot_qty
+                                    FROM tbl_wbs_local_receiving_batch as lb
+                                    LEFT JOIN tbl_wbs_local_receiving as l
+                                    ON l.receive_no = lb.wbs_loc_id
+                                    INNER JOIN tbl_wbs_inventory as il
+                                    on il.loc_batch_id = lb.id
+                                    WHERE il.invoice_no = '".$req->invoiceno."'
+                                    and il.item = '".$req->item."'");
+            if (count($details) < 1) {
+                $details = DB::connection($this->wbs)
+                            ->select("SELECT im.item_desc as item_desc,
+                                            im.supplier as supplier,
+                                            m.app_time as app_time,
+                                            m.app_date as app_date,
+                                            m.receive_no as receive_no,
+                                            SUM(b.qty) as lot_qty
+                                    FROM tbl_wbs_material_receiving_batch as b
+                                    INNER JOIN tbl_wbs_material_receiving as m
+                                    ON m.receive_no = b.wbs_mr_id
+                                    LEFT JOIN tbl_wbs_inventory as im
+                                    on im.mat_batch_id = b.id
+                                    WHERE im.invoice_no = '".$req->invoiceno."'
+                                    and im.item = '".$req->item."'");
+            } else {
+                if (is_null($details[0]->item_desc)) {
+                    $details = DB::connection($this->wbs)
+                                ->select("SELECT im.item_desc as item_desc,
+                                                im.supplier as supplier,
+                                                m.app_time as app_time,
+                                                m.app_date as app_date,
+                                                m.receive_no as receive_no,
+                                                SUM(b.qty) as lot_qty
+                                        FROM tbl_wbs_material_receiving_batch as b
+                                        INNER JOIN tbl_wbs_material_receiving as m
+                                        ON m.receive_no = b.wbs_mr_id
+                                        LEFT JOIN tbl_wbs_inventory as im
+                                        on im.mat_batch_id = b.id
+                                        WHERE im.invoice_no = '".$req->invoiceno."'
+                                        and im.item = '".$req->item."'");
+                }
+            }
+        }
+
+        if ($req->modal_mode == 'inspection') {
+            $lot = DB::connection($this->wbs)
+                    ->select("select l.lot_no as id,
+                            l.lot_no as `text`,
+                            l.qty as qty,
+                            l.id as mr_id,
+                            (select id from tbl_wbs_inventory where loc_batch_id = l.id limit 1) as inv_id,
+                            'LR' as `source`
+                            from tbl_wbs_local_receiving_batch as l
+                            where l.invoice_no = '".$req->invoiceno."'
+                            and l.item = '".$req->item."'
+                            union
+                            select m.lot_no as id,
+                            m.lot_no as `text`,
+                            m.qty as qty,
+                            m.id as mr_id,
+                            (select id from tbl_wbs_inventory where mat_batch_id = m.id limit 1) as inv_id,
+                            'MR' as `source`
+                            from tbl_wbs_material_receiving_batch as m
+                            where m.invoice_no = '".$req->invoiceno."'
+                            and m.item = '".$req->item."'");
+        } else { //on-going
+            $lot = DB::connection($this->wbs)
+                    ->select("select l.lot_no as id,
+                            l.lot_no as `text`,
+                            l.qty as qty,
+                            l.id as mr_id,
+                            (select id from tbl_wbs_inventory where loc_batch_id = l.id limit 1) as inv_id,
+                            'LR' as `source`
+                            from tbl_wbs_local_receiving_batch as l
+                            where l.invoice_no = '".$req->invoiceno."'
+                            and l.item = '".$req->item."'
+                            and l.iqc_status in(3, 0)
+                            union
+                            select m.lot_no as id,
+                            m.lot_no as `text`,
+                            m.qty as qty,
+                            m.id as mr_id,
+                            (select id from tbl_wbs_inventory where mat_batch_id = m.id limit 1) as inv_id,
+                            'MR' as `source`
+                            from tbl_wbs_material_receiving_batch as m
+                            where m.invoice_no = '".$req->invoiceno."'
+                            and m.item = '".$req->item."'
+                            and m.iqc_status in(3, 0)");
+        }
+
+        
+
+        return $data = [
+                'lot' => $lot,
+                'details' => $details
+            ];
+
+        // if ($this->checkIfExistObject($db) > 0 && $this->checkIfExistObject($lot) > 0) {
+        //     return $data = [
+        //         'lot' => $lot,
+        //         'details' => $db
+        //     ];
+        // }
+    }
+
+    private function formatDate($date, $format)
+    {
+        if(empty($date))
+        {
+            return null;
+        }
+        else
+        {
+            return date($format,strtotime($date));
+        }
+    }
+
+    public function saveInspection(Request $req)
+    {
+        $data = [
+            'return_status' => 'failed',
+            'msg' => "Saving Failed."
+        ];
+        $query = false;
+
+        try {
+            $lots = $req->lot_no;
+
+            if (is_string($req->lot_no)) {
+                $lots = explode(',',$req->lot_no);
+            }
+
+            if ($req->save_status == 'ADD') {
+                $this->insertToInspection($req,$lots);
+                $this->insertHistory($lots,$req);
+
+                $query = true;
+
+            } else {
+                $this->updateInspection($req,$lots);
+                $this->insertHistory($lots,$req);
+
+                $query = true;
+            }
+
+            if ($query) {
+                // Event::fire(new UpdateIQCInspection($this->wbs));
+                $data = [
+                    'return_status' => 'success',
+                    'msg' => "Successfully Saved."
+                ];
+            }
+
+            return $data;
+        }
+        catch (Exemption $e) {
+            $data = [
+                'return_status' => 'error',
+                'msg' => $e->getMessage()
+            ];
+
+            return $data;
+        }
+    }
+
+    private function insertToInspection($req,$lots)
+    {
+        $for_lots;
+        $lot_nos = '';
+        $is_batching = $req->is_batching;
+        $Arrinv_id;
+        $Arrmr_id;
+
+        try {
+            if (is_array($lots)) {
+                $for_lots = $lots;
+                $Arrinv_id = explode(',',$req->inv_id);
+                $Arrmr_id = explode(',',$req->mr_id);
+                $lot_nos = implode(',',$lots);
+            } else {
+                $for_lots = explode(',',$lots);
+                $lot_nos = $lots;
+            }
+
+            foreach ($for_lots as $key => $lot) {
+                $lot_qty = $this->getLotQty($req->invoice_no,$req->partcode,$lot);
+                $status = 0;
+                $kitting = 0;
+
+                $check_accepted_judgment = ["Sorted", "Reworked", "Accepted", 'Special Accept'];
+                $check_rejected_judgment = ["RTV", "Rejected"];
+
+                if (in_array($req->judgement,$check_accepted_judgment)) {
+                    $status = 1;
+                    $kitting = 1;
+                } 
+
+                if (in_array($req->judgement,$check_rejected_judgment)) {
+                    $status = 2;
+                    $kitting = 0;
+                }
+
+                $checker = -1;
+                $MRwhereRaw = "";
+                $INVwhereRaw = "";
+                $inv_id = 0;
+                $mr_id = 0;
+
+                if (is_null($req->inv_id) || empty($req->inv_id)) {
+                    $sql_lot = "select l.lot_no as lot_no,
+                                l.id as mr_id,
+                                (select id from tbl_wbs_inventory where loc_batch_id = l.id limit 1) as inv_id,
+                                'LR' as `source`
+                                from tbl_wbs_local_receiving_batch as l
+                                where l.invoice_no = '".$req->invoice_no."'
+                                and l.item = '".$req->partcode."'
+                                and l.lot_no = '".$lot."'
+                                union
+                                select m.lot_no as lot_no,
+                                m.id as mr_id,
+                                (select id from tbl_wbs_inventory where mat_batch_id = m.id limit 1) as inv_id,
+                                'MR' as `source`
+                                from tbl_wbs_material_receiving_batch as m
+                                where m.invoice_no = '".$req->invoice_no."'
+                                and m.item = '".$req->partcode."'
+                                and m.lot_no = '".$lot."'";
+
+                    $db_lot = DB::connection($this->wbs)->select($sql_lot);
+                    $lot_count = count($db_lot);
+                    
+
+                    if ($lot_count > 0) {
+                        if ($db_lot[0]->source == 'MR') {
+                            $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                                            ->where('id',$db_lot[0]->mr_id)
+                                            ->count();
+                            $MRwhereRaw = "id = '".$db_lot[0]->mr_id."'";
+                            $INVwhereRaw = "id = '".$db_lot[0]->inv_id."'";
+                            $inv_id = $db_lot[0]->inv_id;
+                            $mr_id = $db_lot[0]->mr_id;
+                        } else {
+                            $MRwhereRaw = "id = '".$db_lot[0]->mr_id."'";
+                            $INVwhereRaw = "id = '".$db_lot[0]->inv_id."'";
+                            $inv_id = $db_lot[0]->inv_id;
+                            $mr_id = $db_lot[0]->mr_id;
+                        }
+                    } else {
+                        $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                                        ->where('not_for_iqc',0)
+                                        ->where('invoice_no',$req->invoice_no)
+                                        ->where('item',$req->partcode)
+                                        ->where('lot_no',$lot)
+                                        ->count();
+                        $MRwhereRaw = "not_for_iqc=0 AND invoice_no='".$req->invoice_no."' AND item='".$req->partcode."' AND lot_no='".$lot."'";
+                        $INVwhereRaw = "not_for_iqc=0 AND invoice_no='".$req->invoice_no."' AND item='".$req->partcode."' AND lot_no='".$lot."'";
+                    }
+
+                    
+                } else {
+                    
+                    if (Str::contains($req->app_no, 'MAT') ) {
+                        $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                                    ->where('id',$Arrmr_id[$key])
+                                    ->count();
+                        $MRwhereRaw = "id = '".$Arrmr_id[$key]."'";
+                        $INVwhereRaw = "id = '".$Arrinv_id[$key]."'";
+                        
+                        $mr_id = $Arrmr_id[$key];
+                        $inv_id = $Arrinv_id[$key];
+                    } else {
+                        $MRwhereRaw = "id = '".$Arrmr_id[$key]."'";
+                        $INVwhereRaw = "id = '".$Arrinv_id[$key]."'";
+                        
+                        $mr_id = $Arrmr_id[$key];
+                        $inv_id = $Arrinv_id[$key];
+                    }
+                }
+
+
+                if ($checker > 0) {
+                    $table = 'tbl_wbs_material_receiving_batch';
+                } 
+
+                $ngr = $req->ngr;
+
+                DB::connection($this->wbs)->table($table)
+                    ->whereRaw(DB::raw($MRwhereRaw))
+                    ->update([
+                        'iqc_status' => $status,
+                        'for_kitting' => $kitting,
+                        'iqc_result' => $req->remarks,
+                        'judgement' => $req->judgement,
+                        'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                        'ins_time' => $req->time_ins_to,
+                        'ins_by' => $req->inspector,
+                        'updated_at' => Carbon::now(),
+                    ]);
+                    
+                DB::connection($this->wbs)->table('tbl_wbs_inventory')
+                    ->whereRaw(DB::raw($INVwhereRaw))
+                    ->update([
+                        'iqc_status' => $status,
+                        'for_kitting' => $kitting,
+                        'iqc_result' => $req->remarks,
+                        'judgement' => $req->judgement,
+                        'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                        'ins_time' => $req->time_ins_to,
+                        'ins_by' => $req->inspector,
+                        'ngr_status' => $ngr['status_NGR'],
+                        // 'ngr_disposition' => $ngr['disposition_NGR'],
+                        'ngr_control_no' => $ngr['control_no_NGR'],
+                        'ngr_issued_date' => $ngr['date_NGR'],
+                        'iqc_id' => $req->id,
+                        'updated_at' => Carbon::now(),
+                    ]);
+
+                // $table = 'tbl_wbs_local_receiving_batch';
+
+                // $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                //                 ->where('not_for_iqc',0)
+                //                 ->where('invoice_no',$req->invoice_no)
+                //                 ->where('item',$req->partcode)
+                //                 ->where('lot_no',$lot)
+                //                 ->count();
+                // if ($checker > 0) {
+                //     $table = 'tbl_wbs_material_receiving_batch';
+                // }
+
+                // DB::connection($this->wbs)->table($table)
+                //     ->where('not_for_iqc',0)
+                //     ->where('invoice_no',$req->invoice_no)
+                //     ->where('item',$req->partcode)
+                //     ->where('lot_no',$lot)
+                //     ->update([
+                //         'iqc_status' => $status,
+                //         'for_kitting' => $kitting,
+                //         'iqc_result' => $req->remarks,
+                //         'judgement' => $req->judgement,
+                //         'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                //         'ins_time' => $req->time_ins_to,
+                //         'ins_by' => $req->inspector,
+                //         'updated_at' => Carbon::now(),
+                //     ]);
+                // DB::connection($this->wbs)->table('tbl_wbs_inventory')
+                //     ->where('not_for_iqc',0)
+                //     ->where('invoice_no',$req->invoice_no)
+                //     ->where('item',$req->partcode)
+                //     ->where('lot_no',$lot)
+                //     ->update([
+                //         'iqc_status' => $status,
+                //         'for_kitting' => $kitting,
+                //         'iqc_result' => $req->remarks,
+                //         'judgement' => $req->judgement,
+                //         'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                //         'ins_time' => $req->time_ins_to,
+                //         'ins_by' => $req->inspector,
+                //         'updated_at' => Carbon::now(),
+                //     ]);
+            }
+
+            $ngr = $req->ngr;
+
+            DB::connection($this->mysql)->table('iqc_inspections')
+                    ->insert([
+                        'invoice_no' => $req->invoice_no,
+                        'partcode' => $req->partcode,
+                        'partname' => $req->partname,
+                        'supplier' => $req->supplier,
+                        'app_date' => $req->app_date,
+                        'app_time' => $req->app_time,
+                        'app_no' => $req->app_no,
+                        'lot_no' => $lot,
+                        'lot_qty' => $lot_qty,
+                        'type_of_inspection' => $req->type_of_inspection,
+                        'severity_of_inspection' => $req->severity_of_inspection,
+                        'inspection_lvl' => $req->inspection_lvl,
+                        'aql' => $req->aql,
+                        'accept' => $req->accept,
+                        'reject' => $req->reject,
+                        'date_ispected' => $req->date_inspected,
+                        'ww' => $req->ww,
+                        'fy' => $req->fy,
+                        'shift' => $req->shift,
+                        'time_ins_from' => $req->time_ins_from,
+                        'time_ins_to' => $req->time_ins_to,
+                        'inspector' => $req->inspector,
+                        'submission' => $req->submission,
+                        'judgement' => $req->judgement,
+                        'lot_inspected' => $req->lot_inspected,
+                        'lot_accepted' => $req->lot_accepted,
+                        'sample_size' => $req->sample_size,
+                        'no_of_defects' => $req->no_of_defects,
+                        'remarks' => $req->remarks,
+                        'classification' => $req->classification,
+                        'family' => $req->family,
+                        'dbcon' => Auth::user()->productline,
+                        'inv_id' => $req->inv_id,
+                        'mr_id' => $req->mr_id,
+                        'created_at' => Carbon::now(),
+                        'updated_at' => Carbon::now(),
+                        'ngr_status' => $ngr['status_NGR'],
+                        'ngr_disposition' => $ngr['disposition_NGR'],
+                        'ngr_control_no' => $ngr['control_no_NGR'],
+                        'ngr_issued_date' => $ngr['date_NGR'],
+                        'with_dispo' => 0
+                    ]);
+        } catch (Throwable $e) {
+        }
+    }
+    
+    public function specialAccept(Request $req)
+    {
+        $judgement = $req->judgement;
+        $array_lots = $req->lot_no;
+        $wbs_inventory;
+        $partcode = (is_null($req->partcodelbl) && empty($req->partcodelbl)) ? $req->partcode : $req->partcodelbl;
+
+        $query = false;
+        
+        $lot_qty = 0;
+
+        if (is_string($req->lot_no)) {
+            $array_lots = explode(',',$lots);
+        }
+
+        $data = [
+            'return_status' => 'failed',
+            'msg' => "Item Already Accepted."
+        ];
+
+        $check_duplicate = DB::connection($this->mysql)->table('iqc_inspections')
+                            ->where('lot_no', $lots)
+                            ->where('invoice_no', $req->invoice_no)
+                            ->where('judgement', 'Special Accept')
+                            ->count();
+        if ($check_duplicate <= 0) {
+                
+            foreach ($array_lots as $key => $lot) {
+                $lot_qty = $lot_qty + $this->getLotQty($req->invoice_no,$partcode,$lot);
+
+                $status = 4;
+                $kitting = 1;
+
+                $count = DB::connection($this->wbs)->table('tbl_wbs_inventory')
+							->where('id', $req->inv_id)
+							->count();
+				
+				if ($count > 0) {
+					$wbs_inventory = DB::connection($this->wbs)->table('tbl_wbs_inventory')
+										->where('id', $req->inv_id)
+										->first();
+				} else {
+					$wbs_inventory = DB::connection($this->wbs)->table('tbl_wbs_inventory')
+										->where('invoice_no',$req->invoice_no)
+										->where('item',$partcode)
+										->where('lot_no',$lot)
+										->first();
+				}
+
+                DB::connection($this->wbs)->table('tbl_wbs_inventory')
+                    ->insert([
+                        'app_by' => $wbs_inventory->app_by,
+                        'app_date' => $wbs_inventory->app_date,
+                        'app_time'  => $wbs_inventory->app_time,
+                        'box' => $wbs_inventory->box,
+                        'box_qty' => $wbs_inventory->box_qty,
+                        'create_pg' => $wbs_inventory->create_pg,
+                        'create_user' => $wbs_inventory->create_user,
+                        'created_at' => $wbs_inventory->created_at,
+                        'deleted' => $wbs_inventory->deleted,
+                        'drawing_num' => $wbs_inventory->drawing_num,
+                        'for_kitting' => $kitting,
+                        'ins_by' => $wbs_inventory->ins_by,
+                        'ins_date' => $wbs_inventory->ins_date,
+                        'ins_time' => $wbs_inventory->ins_time,
+                        'invoice_no' => $wbs_inventory->invoice_no,
+                        'iqc_result' => $wbs_inventory->iqc_result,
+                        'iqc_status' => $status,
+                        'is_printed' => $wbs_inventory->is_printed,
+                        'item' => $wbs_inventory->item,
+                        'item_desc' => $wbs_inventory->item_desc,
+                        'judgement' => "Special Accept",
+                        'loc_batch_id' => $wbs_inventory->loc_batch_id,
+                        'location' => $wbs_inventory->location,
+                        'lot_no' => $wbs_inventory->lot_no,
+                        'mat_batch_id' => $wbs_inventory->mat_batch_id,
+                        'not_for_iqc' => $wbs_inventory->not_for_iqc,
+                        'plating_date' => $wbs_inventory->plating_date,
+                        'pressed_date' => $wbs_inventory->pressed_date,
+                        'qty' => $wbs_inventory->qty,
+                        'received_date' => $wbs_inventory->received_date,
+                        'supplier' => $wbs_inventory->supplier,
+                        'update_pg' => $wbs_inventory->update_pg,
+                        'update_user' => Auth::user()->user_id,
+                        'updated_at' => Carbon::now(),
+                        'wbs_mr_id' => $wbs_inventory->wbs_mr_id
+                    ]);
+            }
+            
+            DB::connection($this->mysql)->table('iqc_inspections')
+                ->insert([
+                    'invoice_no' => $req->invoice_no,
+                    'partcode' => $partcode,
+                    'partname' => $req->partname,
+                    'supplier' => $req->supplier,
+                    'app_date' => $req->app_date,
+                    'app_time' => $req->app_time,
+                    'app_no' => $req->app_no,
+                    'lot_no' => $lots,
+                    'lot_qty' => $lot_qty,
+                    'type_of_inspection' => $req->type_of_inspection,
+                    'severity_of_inspection' => $req->severity_of_inspection,
+                    'inspection_lvl' => $req->inspection_lvl,
+                    'aql' => $req->aql,
+                    'accept' => $req->accept,
+                    'reject' => $req->reject,
+                    'date_ispected' => $req->date_inspected,
+                    'ww' => $req->ww,
+                    'fy' => $req->fy,
+                    'shift' => $req->shift,
+                    'time_ins_from' => $req->time_ins_from,
+                    'time_ins_to' => $req->time_ins_to,
+                    'inspector' => $req->inspector,
+                    'submission' => $req->submission,
+                    'judgement' => 'Special Accept',
+                    'lot_inspected' => $req->lot_inspected,
+                    'lot_accepted' => $req->lot_accepted,
+                    'sample_size' => $req->sample_size,
+                    'no_of_defects' => $req->no_of_defects,
+                    'remarks' => $req->remarks,
+                    'classification' => $req->classification,
+                    'dbcon' => Auth::user()->productline,
+                    'updated_at' => Carbon::now(),
+                ]);
+            $query = true;
+        }else {
+            $query = false;
+            $data = [
+                'return_status' => 'failed',
+                'msg' => "Item Already Accepted."
+            ];
+        }
+        if ($query) {
+            //Event::fire(new UpdateIQCInspection($this->wbs));
+            $data = [
+                'return_status' => 'success',
+                'msg' => "Special Acceptance Success."
+            ];
+        }
+
+        return $data;
+    }
+
+    private function updateInspection($req,$lots)
+    {
+        $for_lots;
+        $lot_nos = '';
+        $is_batching = $req->is_batching;
+        $Arrinv_id;
+        $Arrmr_id;
+
+        try {
+            if (is_array($lots)) {
+                $for_lots = $lots;
+                $Arrinv_id = explode(',',$req->inv_id);
+                $Arrmr_id = explode(',',$req->mr_id);
+                $lot_nos = implode(',',$lots);
+            } else {
+                $for_lots = explode(',',$lots);
+                $lot_nos = $lots;
+            }
+
+            if ($is_batching == 1 || $is_batching == "1") {
+
+            }
+
+            foreach ($for_lots as $key => $lot) {
+                $lot_qty = $this->getLotQty($req->invoice_no,$req->partcode,$lot);
+                $status = 0;
+                $kitting = 0;
+
+                $check_accepted_judgment = ["Sorted", "Reworked", "Accepted", 'Special Accept'];
+                $check_rejected_judgment = ["RTV", "Rejected"];
+
+                if (in_array($req->judgement,$check_accepted_judgment)) {
+                    $status = 1;
+                    $kitting = 1;
+                } 
+
+                if (in_array($req->judgement,$check_rejected_judgment)) {
+                    $status = 2;
+                    $kitting = 0;
+                }
+
+                $table = 'tbl_wbs_local_receiving_batch';
+
+                $checker = -1;
+                $MRwhereRaw = "";
+                $INVwhereRaw = "";
+                $inv_id = 0;
+                $mr_id = 0;
+
+                if (is_null($req->inv_id) || empty($req->inv_id)) {
+                    $sql_lot = "select l.lot_no as lot_no,
+                                l.id as mr_id,
+                                (select id from tbl_wbs_inventory where loc_batch_id = l.id limit 1) as inv_id,
+                                'LR' as `source`
+                                from tbl_wbs_local_receiving_batch as l
+                                where l.invoice_no = '".$req->invoice_no."'
+                                and l.item = '".$req->partcode."'
+                                and l.lot_no = '".$lot."'
+                                union
+                                select m.lot_no as lot_no,
+                                m.id as mr_id,
+                                (select id from tbl_wbs_inventory where mat_batch_id = m.id limit 1) as inv_id,
+                                'MR' as `source`
+                                from tbl_wbs_material_receiving_batch as m
+                                where m.invoice_no = '".$req->invoice_no."'
+                                and m.item = '".$req->partcode."'
+                                and m.lot_no = '".$lot."'";
+
+                    $db_lot = DB::connection($this->wbs)->select($sql_lot);
+                    $lot_count = count($db_lot);
+                    
+
+                    if ($lot_count > 0) {
+                        if ($db_lot[0]->source == 'MR') {
+                            $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                                            ->where('id',$db_lot[0]->mr_id)
+                                            ->count();
+                            $MRwhereRaw = "id = '".$db_lot[0]->mr_id."'";
+                            $INVwhereRaw = "id = '".$db_lot[0]->inv_id."'";
+                            $inv_id = $db_lot[0]->inv_id;
+                            $mr_id = $db_lot[0]->mr_id;
+                        } else {
+                            $MRwhereRaw = "id = '".$db_lot[0]->mr_id."'";
+                            $INVwhereRaw = "id = '".$db_lot[0]->inv_id."'";
+                            $inv_id = $db_lot[0]->inv_id;
+                            $mr_id = $db_lot[0]->mr_id;
+                        }
+                    } else {
+                        $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                                        ->where('not_for_iqc',0)
+                                        ->where('invoice_no',$req->invoice_no)
+                                        ->where('item',$req->partcode)
+                                        ->where('lot_no',$lot)
+                                        ->count();
+                        $MRwhereRaw = "not_for_iqc=0 AND invoice_no='".$req->invoice_no."' AND item='".$req->partcode."' AND lot_no='".$lot."'";
+                        $INVwhereRaw = "not_for_iqc=0 AND invoice_no='".$req->invoice_no."' AND item='".$req->partcode."' AND lot_no='".$lot."'";
+                    }
+
+                    
+                } else {
+                    
+                    if (Str::contains($req->app_no, 'MAT') ) {
+                        $checker = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                                    ->where('id',$Arrmr_id[$key])
+                                    ->count();
+                        $MRwhereRaw = "id = '".$Arrmr_id[$key]."'";
+                        $INVwhereRaw = "id = '".$Arrinv_id[$key]."'";
+                        
+                        $mr_id = $Arrmr_id[$key];
+                        $inv_id = $Arrinv_id[$key];
+                    } else {
+                        $MRwhereRaw = "id = '".$Arrmr_id[$key]."'";
+                        $INVwhereRaw = "id = '".$Arrinv_id[$key]."'";
+                        
+                        $mr_id = $Arrmr_id[$key];
+                        $inv_id = $Arrinv_id[$key];
+                    }
+                }
+
+
+                if ($checker > 0) {
+                    $table = 'tbl_wbs_material_receiving_batch';
+                } 
+                // else {
+                //     $sql_lot = "select l.lot_no as lot_no,
+                //                 l.id as mr_id,
+                //                 (select id from tbl_wbs_inventory where loc_batch_id = l.id limit 1) as inv_id,
+                //                 'LR' as `source`
+                //                 from tbl_wbs_local_receiving_batch as l
+                //                 where l.invoice_no = '".$req->invoice_no."'
+                //                 and l.item = '".$req->partcode."'";
+
+                //     $db_lot = DB::connection($this->wbs)->select($sql_lot);
+                //     $lot_count = count($db_lot);
+
+                //     if ($lot_count > 0) {
+                //         $MRwhereRaw = "id = '".$db_lot[0]->mr_id."'";
+                //         $INVwhereRaw = "id = '".$db_lot[0]->inv_id."'";
+                //         $inv_id = $db_lot[0]->inv_id;
+                //         $mr_id = $db_lot[0]->mr_id;
+                //     } else {
+                //         $checker = DB::connection($this->wbs)->table($table)
+                //                         ->where('not_for_iqc',0)
+                //                         ->where('invoice_no',$req->invoice_no)
+                //                         ->where('item',$req->partcode)
+                //                         ->where('lot_no',$req->lot_no)
+                //                         ->count();
+                //         $MRwhereRaw = "not_for_iqc=0 AND invoice_no='".$req->invoice_no."' AND item='".$req->partcode."' AND lot_no='".$req->lot_no."'";
+                //         $INVwhereRaw = "not_for_iqc=0 AND invoice_no='".$req->invoice_no."' AND item='".$req->partcode."' AND lot_no='".$req->lot_no."'";
+                //     }
+                // }
+
+                $ngr = $req->ngr;
+
+                DB::connection($this->wbs)->table($table)
+                    ->whereRaw(DB::raw($MRwhereRaw))
+                    ->update([
+                        'iqc_status' => $status,
+                        'for_kitting' => $kitting,
+                        'iqc_result' => $req->remarks,
+                        'judgement' => $req->judgement,
+                        'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                        'ins_time' => $req->time_ins_to,
+                        'ins_by' => $req->inspector,
+                        'updated_at' => Carbon::now(),
+                    ]);
+                    
+                DB::connection($this->wbs)->table('tbl_wbs_inventory')
+                    ->whereRaw(DB::raw($INVwhereRaw))
+                    ->update([
+                        'iqc_status' => $status,
+                        'for_kitting' => $kitting,
+                        'iqc_result' => $req->remarks,
+                        'judgement' => $req->judgement,
+                        'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                        'ins_time' => $req->time_ins_to,
+                        'ins_by' => $req->inspector,
+                        'ngr_status' => $ngr['status_NGR'],
+                        // 'ngr_disposition' => $ngr['disposition_NGR'],
+                        'ngr_control_no' => $ngr['control_no_NGR'],
+                        'ngr_issued_date' => $ngr['date_NGR'],
+                        'iqc_id' => $req->id,
+                        'updated_at' => Carbon::now(),
+                    ]);
+            }
+            
+
+            DB::connection($this->mysql)->table('iqc_inspections')
+                ->where('id',$req->id)
+                ->update([
+                    'partcode' => $req->partcode,
+                    'partname' => $req->partname,
+                    'supplier' => $req->supplier,
+                    'app_date' => $req->app_date,
+                    'app_time' => $req->app_time,
+                    'app_no' => $req->app_no,
+                    'lot_no' => $lot_nos,
+                    'lot_qty' => $req->lot_qty,
+                    'type_of_inspection' => $req->type_of_inspection,
+                    'severity_of_inspection' => $req->severity_of_inspection,
+                    'inspection_lvl' => $req->inspection_lvl,
+                    'aql' => $req->aql,
+                    'accept' => $req->accept,
+                    'reject' => $req->reject,
+                    'date_ispected' => $req->date_inspected,
+                    'ww' => $req->ww,
+                    'fy' => $req->fy,
+                    'shift' => $req->shift,
+                    'time_ins_from' => $req->time_ins_from,
+                    'time_ins_to' => $req->time_ins_to,
+                    'inspector' => $req->inspector,
+                    'submission' => $req->submission,
+                    'judgement' => $req->judgement,
+                    'lot_inspected' => $req->lot_inspected,
+                    'lot_accepted' => $req->lot_accepted,
+                    'sample_size' => $req->sample_size,
+                    'no_of_defects' => $req->no_of_defects,
+                    'remarks' => $req->remarks,
+                    'classification' => $req->classification,
+                    'family' => $req->family,
+                    'dbcon' => Auth::user()->productline,
+                    'updated_at' => Carbon::now(),
+                    'ngr_status' => $ngr['status_NGR'],
+                    // 'ngr_disposition' => $ngr['disposition_NGR'],
+                    'ngr_control_no' => $ngr['control_no_NGR'],
+                    'ngr_issued_date' => $ngr['date_NGR'],
+                    'inv_id' => $inv_id,
+                    'mr_id' => $mr_id
+                ]);
+
+            if (!is_null($ngr['disposition_NGR']) && !empty($ngr['disposition_NGR'])) {
+                
+                // $check_judgment = ["Sorted", "Reworked", "RTV", 'Special Accept'];
+
+                // if (!in_array($req->judgement,$check_judgment)) {
+                //     $this->disposition($req, $lot_nos, $ngr, $inv_id, $mr_id);
+                // }
+
+                $this->disposition($req, $lot_nos, $ngr, $Arrinv_id, $Arrmr_id);
+            }
+
+        } 
+        catch (Throwable $e) {
+        }
+    }
+
+    private function disposition($req, $lot_nos, $ngr, $Arrinv_id, $Arrmr_id)
+    {
+        $dispo = '';
+        $check_duplicate = 0;
+
+        try {
+            if (Str::contains($ngr['disposition_NGR'], 'Sorting')) {
+                $dispo = "Sorted";
+            }
+            elseif (Str::contains($ngr['disposition_NGR'], 'Rework')) {
+                $dispo = "Reworked";
+            }
+            elseif (Str::contains($ngr['disposition_NGR'], 'RTV')) {
+                $dispo = "RTV";
+            }
+            elseif (Str::contains($ngr['disposition_NGR'], 'Special Adoptation')) {
+                $dispo = "Special Accept";
+            }
+            elseif (Str::contains($ngr['disposition_NGR'], 'Accept')) {
+                $dispo = "Special Accept";
+            }
+            elseif (Str::contains($ngr['disposition_NGR'], 'Use as is')) {
+                $dispo = "Special Accept";
+            }
+            elseif (Str::contains($ngr['disposition_NGR'], 'Ok to Use')) {
+                $dispo = "Special Accept";
+            }
+
+
+            // check muna if meron nang dispo
+            $iqc = DB::connection($this->mysql)->table('iqc_inspections')
+                        ->where('id', $req->id)
+                        ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                        ->first();
+
+
+            if ($iqc->judgement == "Rejected") {
+                DB::connection($this->mysql)->table('iqc_inspections')
+                    ->where('id',$req->id)
+                    ->update([
+                        // 'judgement' => $dispo,
+                        'inspector' => $req->inspector,
+                        'updated_at' => Carbon::now(),
+                        'ngr_status' => $ngr['status_NGR'],
+                        'ngr_disposition' => $ngr['disposition_NGR'],
+                        'ngr_control_no' => $ngr['control_no_NGR'],
+                        'ngr_issued_date' => $ngr['date_NGR'],
+                        'with_dispo' => 1
+                    ]);
+                DB::connection($this->mysql)->table('iqc_inspections')
+                    ->insert([
+                        'invoice_no' => $req->invoice_no,
+                        'partcode' => $req->partcode,
+                        'partname' => $req->partname,
+                        'supplier' => $req->supplier,
+                        'app_date' => $req->app_date,
+                        'app_time' => $req->app_time,
+                        'app_no' => $req->app_no,
+                        'lot_no' => $lot_nos,
+                        'lot_qty' => $req->lot_qty,
+                        'type_of_inspection' => $req->type_of_inspection,
+                        'severity_of_inspection' => $req->severity_of_inspection,
+                        'inspection_lvl' => $req->inspection_lvl,
+                        'aql' => $req->aql,
+                        'accept' => $req->accept,
+                        'reject' => $req->reject,
+                        'date_ispected' => $req->date_inspected,
+                        'ww' => $req->ww,
+                        'fy' => $req->fy,
+                        'shift' => $req->shift,
+                        'time_ins_from' => $req->time_ins_from,
+                        'time_ins_to' => $req->time_ins_to,
+                        'inspector' => $req->inspector,
+                        'submission' => $req->submission,
+                        'judgement' => $dispo,
+                        'lot_inspected' => $req->lot_inspected,
+                        'lot_accepted' => $req->lot_accepted,
+                        'sample_size' => $req->sample_size,
+                        'no_of_defects' => $req->no_of_defects,
+                        'remarks' => $req->remarks,
+                        'classification' => $req->classification,
+                        'family' => $req->family,
+                        'dbcon' => Auth::user()->productline,
+                        'created_at' => Carbon::now(),
+                        'updated_at' => Carbon::now(),
+                        'ngr_status' => $ngr['status_NGR'],
+                        'ngr_disposition' => $ngr['disposition_NGR'],
+                        'ngr_control_no' => $ngr['control_no_NGR'],
+                        'ngr_issued_date' => $ngr['date_NGR'],
+                        'inv_id' => implode(',',$Arrinv_id),
+                        'mr_id' => implode(',',$Arrmr_id),
+                        'with_dispo' => 0,
+                        'reject_id' => $req->id
+                    ]);
+            } else {
+                DB::connection($this->mysql)->table('iqc_inspections')
+                    ->where('id',$req->id)
+                    ->update([
+                        'judgement' => $dispo,
+                        'inspector' => $req->inspector,
+                        'updated_at' => Carbon::now(),
+                        'ngr_status' => $ngr['status_NGR'],
+                        'ngr_disposition' => $ngr['disposition_NGR'],
+                        'ngr_control_no' => $ngr['control_no_NGR'],
+                        'ngr_issued_date' => $ngr['date_NGR'],
+                    ]);
+            }
+
+            foreach ($Arrinv_id as $key => $inv_id) {
+
+                $status = 1;
+                $kitting = 1;
+
+                if ($dispo == "RTV") {
+                    $status = 2;
+                    $kitting = 0;
+                }
+
+                $table = "tbl_wbs_material_receiving_batch";
+
+                $check_mr = DB::connection($this->wbs)->table('tbl_wbs_local_receiving_batch')
+                                ->where('id',$Arrmr_id[$key])->count();
+
+                if ($check_mr > 0) {
+                    $table = "tbl_wbs_local_receiving_batch";
+                }
+
+                DB::connection($this->wbs)->table($table)
+                    ->where('id',$Arrmr_id[$key])
+                    ->update([
+                        'iqc_status' => $status,
+                        'for_kitting' => $kitting,
+                        'iqc_result' => $req->remarks,
+                        'judgement' => $dispo,
+                        'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                        'ins_time' => $req->time_ins_to,
+                        'ins_by' => $req->inspector,
+                        'updated_at' => Carbon::now(),
+                    ]);
+
+                DB::connection($this->wbs)->table('tbl_wbs_inventory')
+                ->where('id',$inv_id)
+                ->update([
+                    'iqc_status' => $status,
+                    'for_kitting' => $kitting,
+                    'iqc_result' => $req->remarks,
+                    'judgement' => $dispo,
+                    'ins_date' => $this->formatDate($req->date_inspected,'m/d/Y'),
+                    'ins_time' => $req->time_ins_to,
+                    'ins_by' => $req->inspector,
+                    'ngr_status' => $ngr['status_NGR'],
+                    'ngr_disposition' => $ngr['disposition_NGR'],
+                    'ngr_control_no' => $ngr['control_no_NGR'],
+                    'ngr_issued_date' => $ngr['date_NGR'],
+                    'updated_at' => date('Y-m-d H:i:s'),
+                    'update_user' => Auth::user()->user_id,
+                    'update_pg' => "IQC INSPECTION - NGR Inspection"
+                ]);
+            }
+        } 
+        catch (Throwable $e) {
+        }
+
+            
+    }
+
+    private function insertHistory($lots,$req)
+    {
+        foreach ($lots as $key => $lot) {
+            $lot_qty = $this->getLotQty($req->invoice,$req->partcode,$lot);
+
+            DB::connection($this->mysql)->table('iqc_inspections_history')
+                ->insert([
+                    'invoice_no' => $req->invoice_no,
+                    'partcode' => $req->partcode,
+                    'partname' => $req->partname,
+                    'supplier' => $req->supplier,
+                    'app_date' => $req->app_date,
+                    'app_time' => $req->app_time,
+                    'app_no' => $req->app_no,
+                    'lot_no' => $lot,
+                    'lot_qty' => $lot_qty,
+                    'type_of_inspection' => $req->type_of_inspection,
+                    'severity_of_inspection' => $req->severity_of_inspection,
+                    'inspection_lvl' => $req->inspection_lvl,
+                    'aql' => $req->aql,
+                    'accept' => $req->accept,
+                    'reject' => $req->reject,
+                    'date_ispected' => $req->date_inspected,
+                    'ww' => $req->ww,
+                    'fy' => $req->fy,
+                    'shift' => $req->shift,
+                    'time_ins_from' => $req->time_ins_from,
+                    'time_ins_to' => $req->time_ins_to,
+                    'inspector' => $req->inspector,
+                    'submission' => $req->submission,
+                    'judgement' => $req->judgement,
+                    'lot_inspected' => $req->lot_inspected,
+                    'lot_accepted' => $req->lot_accepted,
+                    'sample_size' => $req->sample_size,
+                    'no_of_defects' => $req->no_of_defects,
+                    'remarks' => $req->remarks,
+                    // 'classification' => $req->classification,
+                    // 'family' => $req->family,
+                    'dbcon' => Auth::user()->productline,
+                    'created_at' => Carbon::now(),
+                ]);
+        }
+    }
+
+    private function requalifyInventory($app_no,$partcode,$lot)
+    {
+        DB::connection($this->wbs)->table('tbl_wbs_inventory')
+            ->where('wbs_mr_id', $app_no)
+            ->where('item', $partcode)
+            ->where('lot_no', $lot)
+            ->update([
+                'received_date' => date('Y-m-d')
+            ]);
+    }
+
+    public function getNumOfDefectives(Request $req)
+    {
+        $db = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                ->where('invoice_no',$req->invoice_no)
+                ->where('partcode',$req->partcode)
+                ->select(
+                    DB::raw("SUM(qty) as no_of_defectives")
+                )
+                ->groupBy('modid')->first();
+        if (count((array)$db) > 0) {
+            return $db->no_of_defectives;
+        } else {
+            return 0;
+        }
+    }
+
+    public function getShift(Request $req)
+    {
+        $shift = '';
+        $from = Carbon::parse($req->from);
+        $to = Carbon::parse($req->to);
+
+        if ($req->from == '7:30 AM' && $req->to == '7:30 PM') {
+            $shift = 'Shift A';
+        }
+
+        if ($req->from == '7:30 PM' && $req->to == '7:30 AM') {
+            $shift = 'Shift B';
+        }
+
+        if ($from->hour < $to->hour) {
+            $shift = 'Shift A';
+        }
+
+        if ($from->hour > $to->hour) {
+            $shift = 'Shift B';
+        }
+
+        return $shift;
+    }
+
+    public function calculateLotQty(Request $req)
+    {
+        $lot_qty = 0;
+        $lot_no = [];
+
+        if (is_array($req->lot_no)) {
+            $lot_no = $req->lot_no;
+        } else {
+            $lot_no = explode(',', $req->lot_no);
+        }
+
+        if (empty($req->lot_no) || is_null($req->lot_no)) {
+            return $lot_qty;
+        } else {
+            foreach ($lot_no as $key => $lot) {
+                $db = DB::connection($this->wbs)
+                        ->select("select m.qty as lot_qty
+                                from tbl_wbs_material_receiving_batch as m
+                                where m.item = '".$req->item."'
+                                and m.invoice_no = '".$req->invoiceno."'
+                                and m.lot_no = '".$lot."'
+                                and m.not_for_iqc = 0
+                                union
+                                select l.qty as lot_qty
+                                from tbl_wbs_local_receiving_batch as l
+                                where l.item = '".$req->item."'
+                                and l.invoice_no = '".$req->invoiceno."'
+                                and l.lot_no = '".$lot."'
+                                and l.not_for_iqc = 0
+                                limit 1");
+
+                // $db = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+                //         ->select('qty as lot_qty')
+                //         ->where('item',$req->item)
+                //         ->where('invoice_no',$req->invoiceno)
+                //         ->where('lot_no',$lot)
+                //         ->first();
+                if (count($db) > 0) {
+                    $lot_qty = $lot_qty + $db[0]->lot_qty;
+                }
+            }
+            return $lot_qty;
+        }
+    }
+
+    private function getLotQty($invoice,$item,$lot)
+    {
+        $lot_qty = 0;
+
+        $sql = "SELECT DISTINCT m.qty as lot_qty
+                FROM tbl_wbs_material_receiving_batch as m
+                WHERE m.not_for_iqc = 0
+                AND m.invoice_no = '".$invoice."'
+                AND m.lot_no = '".$lot."'
+                AND m.item = '".$item."'
+                and m.not_for_iqc = 0
+                UNION
+                SELECT l.qty as lot_qty
+                FROM tbl_wbs_local_receiving_batch as l
+                WHERE l.not_for_iqc = 0
+                AND l.invoice_no = '".$invoice."'
+                AND l.lot_no = '".$lot."'
+                AND l.item = '".$item."'
+                and l.not_for_iqc = 0
+                limit 1";
+
+        $db = DB::connection($this->wbs)->select($sql);
+        $count = count($db);
+
+        if ($count > 0) {
+            $lot_qty = $db[0]->lot_qty;
+        }
+
+        // $db = DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+        //         ->select('qty as lot_qty')
+        //         ->where('item',$item)
+        //         ->where('invoice_no',$invoice)
+        //         ->where('lot_no',$lot)
+        //         ->first();
+        // if ($this->checkIfExistObject($db) > 0) {
+        //     $lot_qty = $db->lot_qty;
+        // }
+
+        return $lot_qty;
+    }
+
+    public function SamplingPlan(Request $req)
+    {
+        $size = 0;
+        $accept = 0;
+        $reject = 0;
+
+        if ($req->soi == 'Normal') {
+            if ($req->il == 'S2') {
+                if ($req->aql == 0.65) {
+                    if ($req->lot_qty <= 20) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+
+                    if ($req->lot_qty > 20) {
+                        $size = 20;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+                }
+            }
+
+            if ($req->il == 'S3') {
+                if ($req->aql == 0.40) {
+                    if ($req->lot_qty <= 32) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+
+                    if ($req->lot_qty > 32) {
+                        $size = 32;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+                }
+
+                if ($req->aql == 1.00) {
+                    if ($req->lot_qty <= 13) {
+                        $size = $req->lot_qty;
+                    }
+
+                    if ($req->lot_qty > 13) {
+                        $size = 13;
+                    }
+                }
+
+                if ($req->aql == 0.25) {
+                    if ($req->lot_qty < 50) {
+                        $size = $req->lot_qty;
+                    }
+
+                    if ($req->lot_qty > 50) {
+                        $size = 50;
+                    }
+                }
+            }
+            if ($req->il == 'II') {
+
+                if ($req->aql == 0.15) {
+                    if ($req->lot_qty <= 80) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 81 && $req->lot_qty <= 3200) {
+                        $size = 80;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 3201 && $req->lot_qty <= 35000) {
+                        $size = 315;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 500;
+                        $accept = 2;
+                        $reject = 3;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 800;
+                        $accept = 3;
+                        $reject = 4;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 5;
+                        $reject = 6;
+                    }
+                }
+
+                if ($req->aql == 0.40) {
+                    if ($req->lot_qty <= 32) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 33 && $req->lot_qty <= 500) {
+                        $size = 32;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 501 && $req->lot_qty <= 3200) {
+                        $size = 125;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 3201 && $req->lot_qty <= 10000) {
+                        $size = 200;
+                        $accept = 2;
+                        $reject = 3;
+                    } elseif ($req->lot_qty >= 10001 && $req->lot_qty <= 35000) {
+                        $size = 315;
+                        $accept = 3;
+                        $reject = 4;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 500;
+                        $accept = 5;
+                        $reject = 6;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 800;
+                        $accept = 7;
+                        $reject = 8;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 10;
+                        $reject = 11;
+                    }
+                }
+
+                if ($req->aql == 0.10) {
+                    if ($req->lot_qty <= 125) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 126 && $req->lot_qty <= 10000) {
+                        $size = 125;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 10001 && $req->lot_qty <= 35000) {
+                        $size = 500;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 500;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 800;
+                        $accept = 2;
+                        $reject = 3;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 3;
+                        $reject = 4;
+                    }
+                }
+
+                if ($req->aql == 0.04) {
+                    if ($req->lot_qty <= 315) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 316 && $req->lot_qty <= 3200) {
+                        $size = 315;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 3201 && $req->lot_qty <= 35000) {
+                        $size = 315;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 315;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 1250;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 1;
+                        $reject = 2;
+                    }
+                }
+            }
+        } else {
+
+            if ($req->il == 'S2') {
+                if ($req->aql == 0.65) {
+                    if ($req->lot_qty <= 31) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+
+                    if ($req->lot_qty > 32) {
+                        $size = 32;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+                }
+            }
+
+            if ($req->il == 'S3') {
+                if ($req->aql == 0.40) {
+                    if ($req->lot_qty <= 50) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+
+                    if ($req->lot_qty > 50) {
+                        $size = 50;
+                        $accept = 0;
+                        $reject = 1;
+                    }
+                }
+
+                if ($req->aql == 0.25) {
+                    if ($req->lot_qty < 80) {
+                        $size = $req->lot_qty;
+                    }
+
+                    if ($req->lot_qty > 80) {
+                        $size = 80;
+                    }
+                }
+            }
+
+            if ($req->il == 'II') {
+                if ($req->aql == 0.15) {
+                    if ($req->lot_qty <= 125) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 126 && $req->lot_qty <= 3200) {
+                        $size = 125;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 3201 && $req->lot_qty <= 150000) {
+                        $size = 500;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 800;
+                        $accept = 2;
+                        $reject = 3;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 3;
+                        $reject = 4;
+                    }
+                }
+
+                if ($req->aql == 0.40) {
+                    if ($req->lot_qty <= 50) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 51 && $req->lot_qty <= 500) {
+                        $size = 50;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 501 && $req->lot_qty <= 10000) {
+                        $size = 200;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 10001 && $req->lot_qty <= 35000) {
+                        $size = 315;
+                        $accept = 2;
+                        $reject = 3;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 500;
+                        $accept = 3;
+                        $reject = 4;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 800;
+                        $accept = 5;
+                        $reject = 6;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 8;
+                        $reject = 9;
+                    }
+                }
+
+                if ($req->aql == 0.10) {
+                    if ($req->lot_qty <= 200) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 201 && $req->lot_qty <= 10000) {
+                        $size = 200;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 10001 && $req->lot_qty <= 35000) {
+                        $size = 800;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 800;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 800;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 1250;
+                        $accept = 2;
+                        $reject = 3;
+                    }
+                }
+
+                if ($req->aql == 0.04) {
+                    if ($req->lot_qty <= 500) {
+                        $size = $req->lot_qty;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 501 && $req->lot_qty <= 3200) {
+                        $size = 500;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 3201 && $req->lot_qty <= 35000) {
+                        $size = 500;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 35001 && $req->lot_qty <= 150000) {
+                        $size = 500;
+                        $accept = 0;
+                        $reject = 1;
+                    } elseif ($req->lot_qty >= 150001 && $req->lot_qty <= 500000) {
+                        $size = 2000;
+                        $accept = 1;
+                        $reject = 2;
+                    } elseif ($req->lot_qty >= 500001) {
+                        $size = 2000;
+                        $accept = 1;
+                        $reject = 2;
+                    }
+                }
+            }
+        }
+
+        return $data = [
+            'sample_size' => $size,
+            'accept' => $accept,
+            'reject' => $reject,
+            'date_inspected' => date('Y-m-d'),
+            'inspector' =>Auth::user()->user_id,
+            //'workweek' =>$this->getWorkWeek()
+        ];
+    }
+
+    public function getDropdowns()
+    {
+        $family = $this->com->getDropdownByNameSelect2('Family');
+        $tofinspection = $this->com->getDropdownByNameSelect2('Type of Inspection');
+        $sofinspection = $this->com->getDropdownByNameSelect2('Severity of Inspection');
+        $inspectionlvl = $this->com->getDropdownByNameSelect2('Inspection Level');
+        $aql = $this->com->getDropdownByNameSelect2('AQL');
+        $shift = $this->com->getDropdownByNameSelect2('Shift');
+        $submission = $this->com->getDropdownByNameSelect2('Submission');
+        $shift = $this->com->getDropdownByNameSelect2('Shift');
+        $mod = $this->com->getDropdownByNameSelect2('Mode of Defect - IQC Inspection');
+
+        $ngr_status = DB::connection($this->mysql)->table('iqc_ngr_master')
+                        ->select('description as id', 'description as text')
+                        ->where('category','STATUS')
+                        ->get();
+
+        $ngr_disposition = DB::connection($this->mysql)->table('iqc_ngr_master')
+                            ->select('description as id', 'description as text')
+                                ->where('category','DISPOSITION')
+                                ->get();
+                                
+        return $data = [
+                    'family' => $family,
+                    'tofinspection' => $tofinspection,
+                    'sofinspection' => $sofinspection,
+                    'inspectionlvl' => $inspectionlvl,
+                    'aql' => $aql,
+                    'shift' => $shift,
+                    'submission' => $submission,
+                    'shift' => $shift,
+                    'mod' => $mod,
+                    'ngr_status' => $ngr_status,
+                    'ngr_disposition' => $ngr_disposition,
+                ];
+    }
+
+    private function checkIfExistObject($object)
+    {
+       return count( (array)$object);
+    }
+
+    private function array_to_object($array)
+    {
+        return (object) $array;
+    }
+
+    public function getWorkWeek()
+    {
+        $yr = 52;
+        $apr = date('Y')."-04-01";
+        $aprweek = date("W", strtotime($apr));
+
+        $diff = $yr - $aprweek;
+        $date = Carbon::now();
+        $weeknow = $date->format("W");
+
+        $workweek = $diff + $weeknow + 1;
+
+        if ($workweek > 52) {
+            return $data = ['workweek' => $workweek - 52];
+        } else {
+            return $data = ['workweek' => $workweek];
+        }
+        
+    }
+
+    public function saveModeOfDefectsInspection(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "Mode of Defect saving failed."
+        ];
+
+        $total_mod_count = $req->current_count + $req->qty;
+
+        if ($total_mod_count > $req->sample_size) {
+            $data = [
+                'return_status' => "failed",
+                "msg" => "Mode of Defect quantity is more than the Sample Size.",
+                "count" => $total_mod_count
+            ];
+        } else {
+            if ($req->status == 'ADD') {
+                $lot_no = (is_array($req->lot_no))? implode(',',$req->lot_no) : $req->lot_no;
+                
+                $query = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                            ->insert([
+                                'iqc_id' => $req->iqc_id,
+                                'invoice_no' => $req->invoiceno,
+                                'partcode' => $req->item,
+                                'mod' => $req->mod,
+                                'qty' => $req->qty,
+                                'lot_no' => $lot_no,
+                                'created_at' => date('Y-m-d H:i:s'),
+                                'updated_at' => date('Y-m-d H:i:s'),
+                            ]);
+            } else {
+                $query = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                            ->where('id',$req->id)
+                            ->update([
+                                'mod' => $req->mod,
+                                'qty' => $req->qty,
+                                'updated_at' => date('Y-m-d H:i:s'),
+                            ]);
+            }
+
+
+            if ($query == true) {
+                $data = [
+                    'return_status' => "success",
+                    "msg" => "Mode of Defect successfully saved.",
+                    "count" => $total_mod_count
+                ];
+            }
+        } 
+
+        return $data;
+    }
+
+    public function deleteModeOfDefectsInspection(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "Mode of Defect deleting failed."
+        ];
+
+        $query = false;
+
+        foreach ($req->id as $key => $id) {
+            $delete = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                        ->where('id',$id)
+                        ->delete();
+            if ($delete == true) {
+                $query = true;
+            }
+        }
+
+
+        if ($query == true) {
+            $data = [
+                'return_status' => "success",
+                "msg" => "Mode of Defect successfully deleted."
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getModeOfDefectsInspection(Request $req)
+    {
+        try {
+			if (is_array($req->lot_no)) {
+				$lot_no = implode(',',$req->lot_no);
+			} else {
+				$lot_no = $req->lot_no;
+			}
+            
+            $db = [];
+
+			$sql = "select distinct m.id as id,
+						m.invoice_no as invoice_no,
+						m.partcode as partcode,
+						m.lot_no as lot_no,
+						m.mod,
+						m.qty,
+						m.created_at,
+						m.iqc_id
+					from iqc_inspections as i
+					join tbl_mod_iqc_inspection as m
+					on i.invoice_no = m.invoice_no
+					and i.partcode = m.partcode
+					and m.iqc_id=".$req->iqc_id;
+
+            $count = DB::connection($this->mysql)->select($sql);
+
+            if (count($count) > 0) {
+                $db = DB::connection($this->mysql)->select($sql);
+            } else {
+				$db = DB::connection($this->mysql)
+						->select("select distinct m.id as id,
+									i.invoice_no as invoice_no,
+									i.partcode as partcode,
+									i.lot_no as lot_no,
+									m.mod,
+									m.qty,
+									m.created_at,
+									m.iqc_id
+								from iqc_inspections as i
+								join tbl_mod_iqc_inspection as m
+								on i.invoice_no = m.invoice_no
+								and i.partcode = m.partcode
+								where m.invoice_no = '".$req->invoiceno."'
+								and (m.lot_no = '".$lot_no."' or i.lot_no = '".$lot_no."')
+								and (i.partcode = '".$req->item."' or m.partcode = '".$req->item."')");
+
+				if (count($db) < 1) {
+					$db = DB::connection($this->mysql)
+							->select("select distinct m.id as id,
+										i.invoice_no as invoice_no,
+										i.partcode as partcode,
+										i.lot_no as lot_no,
+										m.mod,
+										m.qty,
+										m.created_at,
+										m.iqc_id
+									from iqc_inspections as i
+									join tbl_mod_iqc_inspection as m
+									on i.invoice_no = m.invoice_no
+									and i.partcode = m.partcode
+									where m.invoice_no = '".$req->invoiceno."'
+									and (i.partcode = '".$req->item."' or m.partcode = '".$req->item."')");
+					if (count($db) < 1) {
+						$db = DB::connection($this->mysql)
+								->select("select distinct m.id as id,
+											i.invoice_no as invoice_no,
+											i.partcode as partcode,
+											i.lot_no as lot_no,
+											m.mod,
+											m.qty,
+											m.created_at,
+											m.iqc_id
+										from iqc_inspections as i
+										join tbl_mod_iqc_inspection as m
+										on i.invoice_no = m.invoice_no
+										and i.lot_no = m.lot_no
+										where m.invoice_no = '".$req->invoiceno."'
+										and m.lot_no = '".$lot_no."'
+										and (i.partcode = '".$req->item."' or m.partcode = '".$req->item."')");
+					} else {
+						$count = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                            ->where('invoice_no',$req->invoiceno)
+                            ->where('partcode',$req->item)
+                            ->where('lot_no',$lot_no)
+                            ->count();
+
+						if ($count > 0) {
+							$db = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+									->where('invoice_no',$req->invoiceno)
+									->where('partcode',$req->item)
+									->where('lot_no',$lot_no)
+									->get();
+						}
+					}
+				}
+            }
+
+            // if (count($db) > 0) {
+            //     foreach ($db as $key => $d) {
+			// 		if (is_null($d->iqc_id) && empty($d->iqc_id) && $d->iqc_id == 0) {
+			// 			DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+			// 				->where('id',$d->id)
+			// 				->update([
+			// 					'iqc_id' => $req->iqc_id
+			// 				]);
+			// 		}
+
+			// 		if (is_null($d->partcode) && empty($d->partcode)) {
+			// 			DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+			// 				->where('id',$d->id)
+			// 				->update([
+			// 					'partcode' => $req->item
+			// 				]);
+			// 		}
+            //     }
+
+			// 	$cnt = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+			// 				->where('iqc_id',$req->iqc_id)->count();
+
+			// 	if ($cnt > 0) {
+			// 		$db = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+			// 				->where('iqc_id',$req->iqc_id)->get();
+
+			// 		foreach ($db as $key => $dx) {
+			// 			if (is_null($dx->partcode) || empty($dx->partcode)) {
+			// 				DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+			// 					->where('id',$dx->id)
+			// 					->update([
+			// 						'partcode' => $req->item
+			// 					]);
+			// 			}
+			// 		}
+			// 	}
+            // }
+
+        } catch (Exception $e) {
+            return [
+                'success' => false,
+                'msg' => $e->getMessage()
+            ];
+        }
+        
+
+        return $db;
+    }
+
+    public function getIQCData(Request $req)
+    {
+        $from_cond = '';
+        $to_cond = '';
+        $item_cond ='';
+
+        if(empty($req->item))
+        {
+            $item_cond ='';
+        } else {
+            $item_cond = " AND i.partcode = '" . $req->item . "'";
+        }
+
+        if (!empty($req->from) && !empty($req->to)) {
+            $from_cond = "AND i.date_ispected BETWEEN '" . $req->from . "' AND '" . $req->to . "'";
+        } else {
+            $from_cond = '';
+            $to_cond = '';
+        }
+
+        try {
+            // $search = ($item_cond == "" && $from_cond == "" && $to_cond == "")? $req->search['value'] : "";
+
+            // $sql_data = DB::connection($this->mysql)->table('iqc_inspections as i')
+            //                 ->select([
+            //                     DB::raw("i.id as id"), DB::raw("i.invoice_no as invoice_no"), DB::raw("i.partcode as partcode"), DB::raw("i.partname as partname"), 
+            //                     DB::raw("i.supplier as supplier"), DB::raw("i.app_date as app_date"), DB::raw("i.app_time as app_time"), DB::raw("i.app_no as app_no"), 
+            //                     DB::raw("i.lot_no as lot_no"), DB::raw("i.lot_qty as lot_qty"), DB::raw("i.type_of_inspection as type_of_inspection"), DB::raw("i.severity_of_inspection as severity_of_inspection"), 
+            //                     DB::raw("i.inspection_lvl as inspection_lvl"), DB::raw("i.aql as aql"), DB::raw("i.accept as accept"), DB::raw("i.reject as reject"), DB::raw("i.date_ispected as date_ispected"),
+            //                     DB::raw("i.ww as ww"), DB::raw("i.fy as fy"), DB::raw("i.time_ins_from as time_ins_from"), DB::raw("i.time_ins_to as time_ins_to"), 
+            //                     DB::raw("i.shift as shift"), DB::raw("i.inspector as inspector"), DB::raw("i.submission as submission"), DB::raw("i.judgement as judgement"), 
+            //                     DB::raw("i.classification as classification"), DB::raw("i.family as family"), DB::raw("i.lot_inspected as lot_inspected"), DB::raw("i.lot_accepted as lot_accepted"), DB::raw("i.sample_size as sample_size"), 
+            //                     DB::raw("i.no_of_defects as no_of_defects"), DB::raw("i.remarks as remarks"), DB::raw("ngr.id as ngr_status_id"), DB::raw("ngr.description as ngr_status"), DB::raw("i.ngr_disposition as ngr_disposition"),
+            //                     DB::raw("i.ngr_control_no as ngr_control_no"), DB::raw("DATE_FORMAT(i.ngr_issued_date,'%Y-%m-%d') as ngr_issued_date"), DB::raw("i.inv_id as inv_id"), DB::raw("i.mr_id as mr_id"), DB::raw("i.updated_at as updated_at")
+            //                 ])
+            //                 ->leftJoin('iqc_ngr_master as ngr', 'ngr.id', '=', 'i.ngr_status')
+            //                 ->whereRaw("i.judgement <> 'On-going' AND i.with_dispo = 0 ".$item_cond.$from_cond.$to_cond);
+
+            // $sql_query = "SELECT i.id as id, i.invoice_no as invoice_no, i.partcode as partcode, i.partname as partname, 
+            //                 i.supplier as supplier, i.app_date as app_date, i.app_time as app_time, i.app_no as app_no, 
+            //                 i.lot_no as lot_no, i.lot_qty as lot_qty, i.type_of_inspection as type_of_inspection, i.severity_of_inspection as severity_of_inspection, 
+            //                 i.inspection_lvl as inspection_lvl, i.aql as aql, i.accept as accept, i.reject as reject, i.date_ispected as date_ispected,
+            //                 i.ww as ww, i.fy as fy, i.time_ins_from as time_ins_from, i.time_ins_to as time_ins_to, 
+            //                 i.shift as shift, i.inspector as inspector, i.submission as submission, i.judgement as judgement, 
+            //                 i.classification as classification, i.family as family, i.lot_inspected as lot_inspected, i.lot_accepted as lot_accepted, i.sample_size as sample_size, 
+            //                 i.no_of_defects as no_of_defects, i.remarks as remarks, ngr.id as ngr_status_id, ngr.description as ngr_status, i.ngr_disposition as ngr_disposition,
+            //                 i.ngr_control_no as ngr_control_no, DATE_FORMAT(i.ngr_issued_date,'%Y-%m-%d') as ngr_issued_date, i.inv_id as inv_id, i.mr_id as mr_id, i.updated_at 
+            //                 FROM iqc_inspections as i
+            //                 LEFT JOIN iqc_ngr_master as ngr
+            //                 on ngr.id = i.ngr_status
+            //                 WHERE i.judgement <> 'On-going' AND i.with_dispo = 0 ".$item_cond.$from_cond.$to_cond;
+
+            // $sql_data = DB::connection($this->mysql)->select($sql_query);
+
+            // $totalData = count($sql_data);
+
+            // $columns = [
+            //     0 => 'id',
+            //     1 => 'action',
+            //     2 => 'judgement',
+            //     3 => 'ngr_status',
+            //     4 => 'ngr_disposition',
+            //     5 => 'ngr_control_no',
+            //     6 => 'invoice_no',
+            //     7 => 'inspector',
+            //     8 => 'date_ispected',
+            //     9 => 'time_ins_from',
+            //     10 => 'app_no',
+            //     11 => 'app_date',
+            //     12 => 'app_time',
+            //     13 => 'fy',
+            //     14 => 'ww',
+            //     15 => 'submission',
+            //     16 => 'partcode',
+            //     17 => 'partname',
+            //     18 => 'supplier',
+            //     19 => 'lot_no',
+            //     20 => 'lot_qty',
+            //     21 => 'type_of_inspection',
+            //     22 => 'severity_of_inspection',
+            //     23 => 'inspection_lvl',
+            //     24 => 'accept',
+            //     25 => 'reject',
+            //     26 => 'shift',
+            //     27 => 'lot_inspected',
+            //     28 => 'lot_accepted',
+            //     29 => 'sample_size',
+            //     30 => 'no_of_defects',
+            //     31 => 'remarks',
+            //     32 => 'classification',
+            //     33 => 'updated_at'
+            // ];
+
+            // $totalFiltered = $totalData;
+
+            // $limit = $req->length;
+            // $start = $req->start;
+            // $order = $columns[$req->input('order.0.column')];
+            // $dir = $req->input('order.0.dir');
+
+            // if (empty($search)) {
+            //     $sql_data = DB::connection($this->mysql)->table(DB::raw('iqc_inspections as i'))
+            //                 ->select([
+            //                     DB::raw("i.id as id"), DB::raw("i.invoice_no as invoice_no"), DB::raw("i.partcode as partcode"), DB::raw("i.partname as partname"), 
+            //                     DB::raw("i.supplier as supplier"), DB::raw("i.app_date as app_date"), DB::raw("i.app_time as app_time"), DB::raw("i.app_no as app_no"), 
+            //                     DB::raw("i.lot_no as lot_no"), DB::raw("i.lot_qty as lot_qty"), DB::raw("i.type_of_inspection as type_of_inspection"), DB::raw("i.severity_of_inspection as severity_of_inspection"), 
+            //                     DB::raw("i.inspection_lvl as inspection_lvl"), DB::raw("i.aql as aql"), DB::raw("i.accept as accept"), DB::raw("i.reject as reject"), DB::raw("i.date_ispected as date_ispected"),
+            //                     DB::raw("i.ww as ww"), DB::raw("i.fy as fy"), DB::raw("i.time_ins_from as time_ins_from"), DB::raw("i.time_ins_to as time_ins_to"), 
+            //                     DB::raw("i.shift as shift"), DB::raw("i.inspector as inspector"), DB::raw("i.submission as submission"), DB::raw("i.judgement as judgement"), 
+            //                     DB::raw("i.classification as classification"), DB::raw("i.family as family"), DB::raw("i.lot_inspected as lot_inspected"), DB::raw("i.lot_accepted as lot_accepted"), DB::raw("i.sample_size as sample_size"), 
+            //                     DB::raw("i.no_of_defects as no_of_defects"), DB::raw("i.remarks as remarks"), DB::raw("ngr.id as ngr_status_id"), DB::raw("ngr.description as ngr_status"), DB::raw("i.ngr_disposition as ngr_disposition"),
+            //                     DB::raw("i.ngr_control_no as ngr_control_no"), DB::raw("DATE_FORMAT(i.ngr_issued_date,'%Y-%m-%d') as ngr_issued_date"), DB::raw("i.inv_id as inv_id"), DB::raw("i.mr_id as mr_id"), DB::raw("i.updated_at as updated_at")
+            //                 ])
+            //                 ->leftJoin('iqc_ngr_master as ngr', 'ngr.id', '=', 'i.ngr_status')
+            //                 ->whereRaw("i.judgement <> 'On-going' AND i.with_dispo = 0 ".$item_cond.$from_cond.$to_cond);
+            //                 // ->offset($start)
+            //                 // ->limit($limit)
+            //                 // ->orderBy($order, $dir)
+            //                 // ->get();
+            // } else {
+            //     $sql_data = DB::connection($this->mysql)->table(DB::raw('iqc_inspections as i'))
+            //                 ->select([
+            //                     DB::raw("i.id as id"), DB::raw("i.invoice_no as invoice_no"), DB::raw("i.partcode as partcode"), DB::raw("i.partname as partname"), 
+            //                     DB::raw("i.supplier as supplier"), DB::raw("i.app_date as app_date"), DB::raw("i.app_time as app_time"), DB::raw("i.app_no as app_no"), 
+            //                     DB::raw("i.lot_no as lot_no"), DB::raw("i.lot_qty as lot_qty"), DB::raw("i.type_of_inspection as type_of_inspection"), DB::raw("i.severity_of_inspection as severity_of_inspection"), 
+            //                     DB::raw("i.inspection_lvl as inspection_lvl"), DB::raw("i.aql as aql"), DB::raw("i.accept as accept"), DB::raw("i.reject as reject"), DB::raw("i.date_ispected as date_ispected"),
+            //                     DB::raw("i.ww as ww"), DB::raw("i.fy as fy"), DB::raw("i.time_ins_from as time_ins_from"), DB::raw("i.time_ins_to as time_ins_to"), 
+            //                     DB::raw("i.shift as shift"), DB::raw("i.inspector as inspector"), DB::raw("i.submission as submission"), DB::raw("i.judgement as judgement"), 
+            //                     DB::raw("i.classification as classification"), DB::raw("i.family as family"), DB::raw("i.lot_inspected as lot_inspected"), DB::raw("i.lot_accepted as lot_accepted"), DB::raw("i.sample_size as sample_size"), 
+            //                     DB::raw("i.no_of_defects as no_of_defects"), DB::raw("i.remarks as remarks"), DB::raw("ngr.id as ngr_status_id"), DB::raw("ngr.description as ngr_status"), DB::raw("i.ngr_disposition as ngr_disposition"),
+            //                     DB::raw("i.ngr_control_no as ngr_control_no"), DB::raw("DATE_FORMAT(i.ngr_issued_date,'%Y-%m-%d') as ngr_issued_date"), DB::raw("i.inv_id as inv_id"), DB::raw("i.mr_id as mr_id"), DB::raw("i.updated_at as updated_at")
+            //                 ])
+            //                 ->leftJoin('iqc_ngr_master as ngr', 'ngr.id', '=', 'i.ngr_status')
+            //                 ->whereRaw("i.judgement <> 'On-going' AND i.with_dispo = 0 
+            //                             AND (i.judgement LIKE '%".$search."%'
+            //                             OR ngr.description LIKE '%".$search."%'
+            //                             OR i.ngr_disposition LIKE '%".$search."%'
+            //                             OR i.ngr_control_no LIKE '%".$search."%'
+            //                             OR i.invoice_no LIKE '%".$search."%'
+            //                             OR i.inspector LIKE '%".$search."%'
+            //                             OR i.date_ispected LIKE '%".$search."%'
+            //                             OR i.time_ins_from LIKE '%".$search."%'
+            //                             OR i.app_no LIKE '%".$search."%'
+            //                             OR i.app_date LIKE '%".$search."%'
+            //                             OR i.app_time LIKE '%".$search."%'
+            //                             OR i.fy LIKE '%".$search."%'
+            //                             OR i.ww LIKE '%".$search."%'
+            //                             OR i.submission LIKE '%".$search."%'
+            //                             OR i.partcode LIKE '%".$search."%'
+            //                             OR i.partname LIKE '%".$search."%'
+            //                             OR i.supplier LIKE '%".$search."%'
+            //                             OR i.lot_no LIKE '%".$search."%'
+            //                             OR i.aql LIKE '%".$search."%'
+            //                             OR i.lot_qty LIKE '%".$search."%'
+            //                             OR i.type_of_inspection LIKE '%".$search."%'
+            //                             OR i.severity_of_inspection LIKE '%".$search."%'
+            //                             OR i.accept LIKE '%".$search."%'
+            //                             OR i.reject LIKE '%".$search."%'
+            //                             OR i.shift LIKE '%".$search."%'
+            //                             OR i.lot_inspected LIKE '%".$search."%'
+            //                             OR i.lot_accepted LIKE '%".$search."%'
+            //                             OR i.sample_size LIKE '%".$search."%'
+            //                             OR i.no_of_defects LIKE '%".$search."%'
+            //                             OR i.remarks LIKE '%".$search."%')");
+            //                 // ->offset($start)
+            //                 // ->limit($limit)
+            //                 // ->orderBy($order, $dir)
+
+            //     //$totalFiltered = DB::connection($this->mysql)->table('iqc_inspections as i')
+            //                         // ->leftJoin('iqc_ngr_master as ngr', 'ngr.id', '=', 'i.ngr_status')
+            //                         // ->whereRaw("i.judgement <> 'On-going' AND i.with_dispo = 0 
+            //                         //     AND (i.judgement LIKE '%".$search."%'
+            //                         //     OR ngr.description LIKE '%".$search."%'
+            //                         //     OR i.ngr_disposition LIKE '%".$search."%'
+            //                         //     OR i.ngr_control_no LIKE '%".$search."%'
+            //                         //     OR i.invoice_no LIKE '%".$search."%'
+            //                         //     OR i.inspector LIKE '%".$search."%'
+            //                         //     OR i.date_ispected LIKE '%".$search."%'
+            //                         //     OR i.time_ins_from LIKE '%".$search."%'
+            //                         //     OR i.app_no LIKE '%".$search."%'
+            //                         //     OR i.app_date LIKE '%".$search."%'
+            //                         //     OR i.app_time LIKE '%".$search."%'
+            //                         //     OR i.fy LIKE '%".$search."%'
+            //                         //     OR i.ww LIKE '%".$search."%'
+            //                         //     OR i.submission LIKE '%".$search."%'
+            //                         //     OR i.partcode LIKE '%".$search."%'
+            //                         //     OR i.partname LIKE '%".$search."%'
+            //                         //     OR i.supplier LIKE '%".$search."%'
+            //                         //     OR i.lot_no LIKE '%".$search."%'
+            //                         //     OR i.aql LIKE '%".$search."%'
+            //                         //     OR i.lot_qty LIKE '%".$search."%'
+            //                         //     OR i.type_of_inspection LIKE '%".$search."%'
+            //                         //     OR i.severity_of_inspection LIKE '%".$search."%'
+            //                         //     OR i.accept LIKE '%".$search."%'
+            //                         //     OR i.reject LIKE '%".$search."%'
+            //                         //     OR i.shift LIKE '%".$search."%'
+            //                         //     OR i.lot_inspected LIKE '%".$search."%'
+            //                         //     OR i.lot_accepted LIKE '%".$search."%'
+            //                         //     OR i.sample_size LIKE '%".$search."%'
+            //                         //     OR i.no_of_defects LIKE '%".$search."%'
+            //                         //     OR i.remarks LIKE '%".$search."%')")
+            //                         // ->count();
+            // }
+
+            // $data = [];
+
+            // if (!empty($sql_data)) {
+            //     $data = $sql_data;
+            // }
+
+            // $json_data = [
+            //     'draw' => intval($req->draw),
+            //     'recordsTotal' => intval($totalData),
+            //     'recordsFiltered' => intval($totalFiltered),
+            //     'data' => $sql_data
+            // ];
+
+            $sql_data = DB::connection($this->mysql)->table(DB::raw('iqc_inspections as i'))
+                            ->select([
+                                DB::raw("i.id as id"), DB::raw("i.invoice_no as invoice_no"), DB::raw("i.partcode as partcode"), DB::raw("i.partname as partname"), 
+                                DB::raw("i.supplier as supplier"), DB::raw("i.app_date as app_date"), DB::raw("i.app_time as app_time"), DB::raw("i.app_no as app_no"), 
+                                DB::raw("i.lot_no as lot_no"), DB::raw("i.lot_qty as lot_qty"), DB::raw("i.type_of_inspection as type_of_inspection"), DB::raw("i.severity_of_inspection as severity_of_inspection"), 
+                                DB::raw("i.inspection_lvl as inspection_lvl"), DB::raw("i.aql as aql"), DB::raw("i.accept as accept"), DB::raw("i.reject as reject"), DB::raw("i.date_ispected as date_ispected"),
+                                DB::raw("i.ww as ww"), DB::raw("i.fy as fy"), DB::raw("i.time_ins_from as time_ins_from"), DB::raw("i.time_ins_to as time_ins_to"), 
+                                DB::raw("i.shift as shift"), DB::raw("i.inspector as inspector"), DB::raw("i.submission as submission"), DB::raw("i.judgement as judgement"), 
+                                DB::raw("i.classification as classification"), DB::raw("i.family as family"), DB::raw("i.lot_inspected as lot_inspected"), DB::raw("i.lot_accepted as lot_accepted"), DB::raw("i.sample_size as sample_size"), 
+                                DB::raw("i.no_of_defects as no_of_defects"), DB::raw("i.remarks as remarks"), DB::raw("ngr.id as ngr_status_id"), DB::raw("ngr.description as ngr_status"), DB::raw("i.ngr_disposition as ngr_disposition"),
+                                DB::raw("i.ngr_control_no as ngr_control_no"), DB::raw("DATE_FORMAT(i.ngr_issued_date,'%Y-%m-%d') as ngr_issued_date"), DB::raw("i.inv_id as inv_id"), DB::raw("i.mr_id as mr_id"), DB::raw("i.updated_at as updated_at")
+                            ])
+                            ->leftJoin('iqc_ngr_master as ngr', 'ngr.id', '=', 'i.ngr_status')
+                            ->whereRaw("i.judgement <> 'On-going' AND i.with_dispo = 0 AND (is_deleted is null or is_deleted = 0) ".$item_cond.$from_cond.$to_cond);
+
+            return Datatables::of($sql_data)->make(true);
+
+            //return $json_data;
+        } catch (\Throwable $th) {
+            $json_data = [
+                'error' => $th
+            ];
+
+            return json_encode($json_data);
+        }
+    }
+
+    public function getOngoing(Request $req)
+    {
+        try {
+            // $search = $req->search['value'];
+
+            // $sql_query = "SELECT id as id, invoice_no as invoice_no, partcode as partcode, partname as partname, 
+            //                 supplier as supplier, app_date as app_date, app_time as app_time, app_no as app_no, 
+            //                 lot_no as lot_no, lot_qty as lot_qty, type_of_inspection as type_of_inspection, severity_of_inspection as severity_of_inspection, 
+            //                 inspection_lvl as inspection_lvl, aql as aql, accept as accept, reject as reject, date_ispected as date_ispected,
+            //                 ww as ww, fy as fy, time_ins_from as time_ins_from, time_ins_to as time_ins_to, 
+            //                 shift as shift, inspector as inspector, submission as submission, judgement as judgement, 
+            //                 classification as classification, family as family, lot_inspected as lot_inspected, lot_accepted as lot_accepted, sample_size as sample_size, 
+            //                 no_of_defects as no_of_defects, remarks as remarks, inv_id as inv_id, mr_id as mr_id, created_at 
+            //                 FROM iqc_inspections as i
+            //                 WHERE judgement = 'On-going' ";
+
+            // $sql_data = DB::connection($this->mysql)->select($sql_query);
+
+            // $totalData = count($sql_data);
+
+            // $columns = [
+            //     0 => 'id',
+            //     1 => 'action',
+            //     2 => 'judgement',
+            //     3 => 'invoice_no',
+            //     4 => 'inspector',
+            //     5 => 'date_ispected',
+            //     6 => 'time_ins_from',
+            //     7 => 'app_no',
+            //     8 => 'fy',
+            //     9 => 'ww',
+            //     10 => 'submission',
+            //     11 => 'partcode',
+            //     12 => 'partname',
+            //     13 => 'supplier',
+            //     14 => 'lot_no',
+            //     15 => 'lot_qty',
+            //     16 => 'created_at'
+            // ];
+
+            // $totalFiltered = $totalData;
+
+            // $limit = $req->length;
+            // $start = $req->start;
+            // $order = $columns[$req->input('order.0.column')];
+            // $dir = $req->input('order.0.dir');
+
+            // if (empty($req->input('search.value'))) {
+            //     $sql_data = DB::connection($this->mysql)->table('iqc_inspections')
+            //                 ->select([
+            //                     'id', 'invoice_no', 'partcode', 'partname', 
+            //                     'supplier', 'app_date', 'app_time', 'app_no', 
+            //                     'lot_no', 'lot_qty', 'type_of_inspection', 'severity_of_inspection', 
+            //                     'inspection_lvl', 'aql', 'accept', 'reject', 'date_ispected',
+            //                     'ww', 'fy', 'time_ins_from', 'time_ins_to', 
+            //                     'shift', 'inspector', 'submission', 'judgement', 
+            //                     'classification', 'family', 'lot_inspected', 'lot_accepted', 'sample_size', 
+            //                     'no_of_defects', 'remarks', 'inv_id', 'mr_id', 'created_at'
+            //                 ])
+            //                 ->where('judgement','=','On-going')
+            //                 ->offset($start)
+            //                 ->limit($limit)
+            //                 ->orderBy($order, $dir)
+            //                 ->get();
+            // } else {
+            //     $sql_data = DB::connection($this->mysql)->table('iqc_inspections')
+            //                 ->select([
+            //                     'id', 'invoice_no', 'partcode', 'partname', 
+            //                     'supplier', 'app_date', 'app_time', 'app_no', 
+            //                     'lot_no', 'lot_qty', 'type_of_inspection', 'severity_of_inspection', 
+            //                     'inspection_lvl', 'aql', 'accept', 'reject', 'date_ispected',
+            //                     'ww', 'fy', 'time_ins_from', 'time_ins_to', 
+            //                     'shift', 'inspector', 'submission', 'judgement', 
+            //                     'classification', 'family', 'lot_inspected', 'lot_accepted', 'sample_size', 
+            //                     'no_of_defects', 'remarks', 'inv_id', 'mr_id', 'created_at'
+            //                 ])
+            //                 ->whereRaw("judgement = 'On-going' AND (invoice_no LIKE '%".$search."%'
+            //                             OR inspector LIKE '%".$search."%'
+            //                             OR date_ispected LIKE '%".$search."%'
+            //                             OR time_ins_from LIKE '%".$search."%'
+            //                             OR app_no LIKE '%".$search."%'
+            //                             OR fy LIKE '%".$search."%'
+            //                             OR ww LIKE '%".$search."%'
+            //                             OR submission LIKE '%".$search."%'
+            //                             OR partcode LIKE '%".$search."%'
+            //                             OR partname LIKE '%".$search."%'
+            //                             OR supplier LIKE '%".$search."%'
+            //                             OR lot_no LIKE '%".$search."%'
+            //                             OR lot_qty LIKE '%".$search."%')")
+            //                 ->offset($start)
+            //                 ->limit($limit)
+            //                 ->orderBy($order, $dir)
+            //                 ->get();
+
+            //     $totalFiltered = DB::connection($this->mysql)->table('iqc_inspections')
+            //                         ->select([
+            //                             'id', 'invoice_no', 'partcode', 'partname', 
+            //                             'supplier', 'app_date', 'app_time', 'app_no', 
+            //                             'lot_no', 'lot_qty', 'type_of_inspection', 'severity_of_inspection', 
+            //                             'inspection_lvl', 'aql', 'accept', 'reject', 'date_ispected',
+            //                             'ww', 'fy', 'time_ins_from', 'time_ins_to', 
+            //                             'shift', 'inspector', 'submission', 'judgement', 
+            //                             'classification', 'family', 'lot_inspected', 'lot_accepted', 'sample_size', 
+            //                             'no_of_defects', 'remarks', 'inv_id', 'mr_id', 'created_at'
+            //                         ])
+            //                         ->whereRaw("judgement = 'On-going' AND (invoice_no LIKE '%".$search."%'
+            //                                     OR inspector LIKE '%".$search."%'
+            //                                     OR date_ispected LIKE '%".$search."%'
+            //                                     OR time_ins_from LIKE '%".$search."%'
+            //                                     OR app_no LIKE '%".$search."%'
+            //                                     OR fy LIKE '%".$search."%'
+            //                                     OR ww LIKE '%".$search."%'
+            //                                     OR submission LIKE '%".$search."%'
+            //                                     OR partcode LIKE '%".$search."%'
+            //                                     OR partname LIKE '%".$search."%'
+            //                                     OR supplier LIKE '%".$search."%'
+            //                                     OR lot_no LIKE '%".$search."%'
+            //                                     OR lot_qty LIKE '%".$search."%')")
+            //                         ->count();
+            // }
+
+            // $data = [];
+
+            // if (!empty($sql_data)) {
+            //     $data = $sql_data;
+            // }
+
+            // $json_data = [
+            //     'draw' => intval($req->draw),
+            //     'recordsTotal' => intval($totalData),
+            //     'recordsFiltered' => intval($totalFiltered),
+            //     'data' => $data
+            // ];
+
+            $sql_data = DB::connection($this->mysql)->table('iqc_inspections')
+                            ->select([
+                                'id', 'invoice_no', 'partcode', 'partname', 
+                                'supplier', 'app_date', 'app_time', 'app_no', 
+                                'lot_no', 'lot_qty', 'type_of_inspection', 'severity_of_inspection', 
+                                'inspection_lvl', 'aql', 'accept', 'reject', 'date_ispected',
+                                'ww', 'fy', 'time_ins_from', 'time_ins_to', 
+                                'shift', 'inspector', 'submission', 'judgement', 
+                                'classification', 'family', 'lot_inspected', 'lot_accepted', 'sample_size', 
+                                'no_of_defects', 'remarks', 'inv_id', 'mr_id', 'created_at'
+                            ])
+                            ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                            ->where('judgement','=','On-going');
+                            // ->offset($start)
+                            // ->limit($limit)
+                            // ->orderBy($order, $dir)
+                            //->get();
+
+            // return json_encode($json_data);
+
+            return Datatables::of($sql_data)->addColumn('action', function ($data) { return ''; })->make(true);
+        } catch (\Throwable $th) {
+            return json_encode($th);
+        }
+        // $onGoing =  DB::connection($this->mysql)->table('iqc_inspections')
+        //             ->where('judgement','On-going')
+        //             ->orderBy('created_at','desc')
+        //             ->select(['id','invoice_no','partcode','partname','supplier','app_date','app_time','app_no','lot_no','lot_qty','type_of_inspection','severity_of_inspection',
+        //                             'inspection_lvl','aql','accept','reject','date_ispected','ww','fy','time_ins_from','time_ins_to','shift','inspector','submission','judgement',
+        //                             'lot_inspected','lot_accepted','sample_size','no_of_defects','remarks','inv_id','mr_id']);
+
+        // return Datatables::of($onGoing)
+        //                 ->editColumn('id', function ($data) {
+        //                     return $data->id;
+        //                 })
+        //                 ->addColumn('action', function ($data) {
+                            
+        //                 })
+        //                 ->make(true);
+    }
+
+    public function deleteOnGoing(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "On-going data deleting failed."
+        ];
+
+        $query = false;
+        $inv_ids = [];
+        $mr_ids = [];
+
+        foreach ($req->id as $key => $id) {
+            $iqc = DB::connection($this->mysql)->table('iqc_inspections')
+                        ->where('id',$id)
+                        ->select('id','inv_id','mr_id','app_no')
+                        ->first();
+
+            if (count((array)$iqc) > 0) {
+                //$lot_nos = explode(',', $iqc->lot_no);
+                $inv_ids = explode(',', $iqc->inv_id);
+                $mr_ids = explode(',', $iqc->mr_id);
+
+                $table = "tbl_wbs_local_receiving_batch";
+
+                if (Str::contains($iqc->app_no, 'MAT')) {
+                    $table = "tbl_wbs_material_receiving_batch";
+                }
+
+                foreach ($inv_ids as $key => $inv_id) {
+                    $checkInv = DB::connection($this->wbs)->table("tbl_wbs_inventory")
+                                    ->where('id', $inv_id)
+                                    ->update([
+                                        'for_kitting' => 0,
+                                        'iqc_status' => 0,
+                                        'iqc_result' => '',
+                                        'judgement' => '',
+                                        'ins_date' => '',
+                                        'ins_time' => '',
+                                        'ins_by' => '',
+                                        'updated_at' => date('Y-m-d H:i:s'),
+                                        'update_user' => Auth::user()->user_id,
+                                        'update_pg' => "IQC INSPECTION - Delete On-going function"
+                                    ]);
+                    $checkBatch = DB::connection($this->wbs)->table($table)
+                                    ->where('id', $mr_ids[$key])
+                                    ->update([
+                                        'for_kitting' => 0,
+                                        'iqc_status' => 0,
+                                        'iqc_result' => '',
+                                        'judgement' => '',
+                                        'ins_date' => '',
+                                        'ins_time' => '',
+                                        'ins_by' => ''
+                                    ]);
+
+                    $checkBatch = true;
+                }
+
+                // foreach ($lot_nos as $key => $lot) {
+                //     $checkInv = DB::connection($this->wbs)->update(
+                //                         "UPDATE tbl_wbs_inventory SET iqc_status='0'
+                //                         WHERE invoice_no='".$iqc->invoice_no."' AND item='".$iqc->partcode."' AND lot_no='".$lot."'"
+                //                     );
+                                    
+
+                //     $checkBatch = DB::connection($this->wbs)->update(
+                //                         "UPDATE tbl_wbs_material_receiving_batch SET iqc_status='0'
+                //                         WHERE invoice_no='".$iqc->invoice_no."' AND item='".$iqc->partcode."' AND lot_no='".$lot."'"
+                //                     );
+
+                //     $checkBatch = DB::connection($this->wbs)->update(
+                //                         "UPDATE tbl_wbs_local_receiving_batch SET iqc_status='0'
+                //                         WHERE invoice_no='".$iqc->invoice_no."' AND item='".$iqc->partcode."' AND lot_no='".$lot."'"
+                //                     );
+
+                //     $checkBatch = true;
+                // }
+                if ($checkBatch == true) {
+                    $delete = DB::connection($this->mysql)->table('iqc_inspections')
+                                ->where('id',$id)
+                                ->delete();
+                    $query = true;
+                }
+                //$query = true;
+            }
+
+        }
+        
+
+
+        if ($query == true) {
+            $data = [
+                'return_status' => "success",
+                "msg" => "Inspection data successfully deleted."
+            ];
+        }
+
+        return $data;
+    }
+
+    public function deleteIQCInspection(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "Inspection data deleting failed."
+        ];
+
+        $query = false;
+
+        foreach ($req->id as $key => $id) {
+            $iqc = DB::connection($this->mysql)->table('iqc_inspections')
+                        ->where('id',$id)
+                        ->select('id','inv_id','mr_id','app_no')
+                        ->first();
+
+            if (count((array)$iqc) > 0) {
+                //$lot_nos = explode(',', $iqc->lot_no);
+                $inv_ids = explode(',', $iqc->inv_id);
+                $mr_ids = explode(',', $iqc->mr_id);
+
+                $table = "tbl_wbs_local_receiving_batch";
+
+                if (Str::contains($iqc->app_no, 'MAT')) {
+                    $table = "tbl_wbs_material_receiving_batch";
+                }
+
+                foreach ($inv_ids as $key => $inv_id) {
+                    $checkInv = DB::connection($this->wbs)->table("tbl_wbs_inventory")
+                                    ->where('id', $inv_id)
+                                    ->update([
+                                        'for_kitting' => 0,
+                                        'iqc_status' => 0,
+                                        'iqc_result' => '',
+                                        'judgement' => '',
+                                        'ins_date' => '',
+                                        'ins_time' => '',
+                                        'ins_by' => '',
+                                        'updated_at' => date('Y-m-d H:i:s'),
+                                        'update_user' => Auth::user()->user_id,
+                                        'update_pg' => "IQC INSPECTION - Delete function"
+                                    ]);
+                    $checkBatch = DB::connection($this->wbs)->table($table)
+                                    ->where('id', $mr_ids[$key])
+                                    ->update([
+                                        'for_kitting' => 0,
+                                        'iqc_status' => 0,
+                                        'iqc_result' => '',
+                                        'judgement' => '',
+                                        'ins_date' => '',
+                                        'ins_time' => '',
+                                        'ins_by' => ''
+                                    ]);
+
+                    $checkBatch = true;
+                }
+                if ($checkBatch == true) {
+                    $delete = DB::connection($this->mysql)->table('iqc_inspections')
+                                ->where('id',$id)
+                                ->update([
+                                    'is_deleted' => 1,
+                                    'deleted_at' => date('Y-m-d H:i:s'),
+                                    'delete_user' => Auth::user()->user_id
+                                ]);
+                    $query = true;
+                }
+                //$query = true;
+            }
+
+        }
+
+        // foreach ($req->id as $key => $id) {
+        //     $delete = DB::connection($this->mysql)->table('iqc_inspections')
+        //                 ->where('id',$id)
+        //                 ->delete();
+        //     if ($delete == true) {
+        //         $query = true;
+        //     }
+        // }
+
+
+        if ($query == true) {
+            $data = [
+                'return_status' => "success",
+                "msg" => "Inspection data successfully deleted."
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getItemsSearch(Request $req)
+    {
+        $results = [];
+        $val = (!isset($req->q))? "" : $req->q;
+        $id = (!isset($req->id))? "" : $req->id;
+        $text = (!isset($req->text))? "" : $req->text;
+        $table = (!isset($req->table))? "" : $req->table;
+        $condition = (!isset($req->condition))? "" : $req->condition;
+        $isDistinct = (!isset($req->isDistinct))? "" : $req->isDistinct;
+        $display = (!isset($req->display))? "" : $req->display;
+        $addOptionVal = (!isset($req->addOptionVal))? "" : $req->addOptionVal;
+        $addOptionText = (!isset($req->addOptionText))? "" : $req->addOptionText;
+        $sql_query = (!isset($req->sql_query))? "" : $req->sql_query;
+        $orderBy = (!isset($req->orderBy))? "" : $req->orderBy;
+        $search = "";
+
+        try {
+            if ($addOptionVal != "" && $display == "id&text") {
+                array_push($results, [
+                    'id' => $addOptionVal,
+                    'text' => $addOptionText
+                ]);
+            }
+
+            if ($sql_query == null || $sql_query == "") {
+                if (!empty($val) && !is_null($val)) {
+                    $search = " AND partcode LIKE '%".$val."%'";
+                }
+                $sql_query = "SELECT DISTINCT partcode as id, partcode as `text`
+                                FROM iqc_inspections WHERE (is_deleted is null or is_deleted = 0) ".$search;
+            }
+            
+            $db = DB::connection($this->mysql)->select($sql_query);
+
+            foreach ($db as $key => $d) {
+                array_push($results, [
+                    'id' => $d->id,
+                    'text' => $d->text
+                ]);
+            }
+
+        } catch(\Exemption $e) {
+            return [
+                'success' => false,
+                'msessage' => $e->getMessage()
+            ];
+        }
+        
+        return $results;
+
+        // $db = DB::connection($this->mysql)->table('iqc_inspections')
+        //         ->select('partcode as id','partcode as text')
+        //         ->distinct()
+        //         ->get();
+        // if ($this->checkIfExistObject($db) > 0) {
+        //     return $db;
+        // }
+    }
+
+    public function searchInspection(Request $req)
+    {
+        $from_cond = '';
+        $to_cond = '';
+        $item_cond ='';
+
+        if(empty($req->item))
+        {
+            $item_cond ='';
+        } else {
+            $item_cond = " AND partcode = '" . $req->item . "'";
+        }
+
+        if (!empty($req->from) && !empty($req->to)) {
+            $from_cond = "AND date_ispected BETWEEN '" . $req->from . "' AND '" . $req->to . "'";
+        } else {
+            $from_cond = '';
+            $to_cond = '';
+        }
+
+        $data = DB::connection($this->mysql)->table('iqc_inspections')
+                    ->whereRaw(" (is_deleted is null or is_deleted = 0) ".$item_cond.$from_cond.$to_cond)
+                    ->get();
+        return $data;
+    }
+
+    public function searchHistory(Request $req)
+    {
+        $from_cond = '';
+        $to_cond = '';
+        $item_cond ='';
+        $lot_cond = '';
+        $judge_cond = '';
+
+        if(empty($req->item))
+        {
+            $item_cond ='';
+        } else {
+            $item_cond = " AND partcode = '" . $req->item . "'";
+        }
+
+        if (!empty($req->from) && !empty($req->to)) {
+            $from_cond = "AND date_ispected BETWEEN '" . $req->from . "' AND '" . $req->to . "'";
+        } else {
+            $from_cond = '';
+            $to_cond = '';
+        }
+
+        if(empty($req->lotno))
+        {
+            $lot_cond ='';
+        } else {
+            $lot_cond = " AND lot_no = '" . $req->lotno . "'";
+        }
+
+        if(empty($req->judgement))
+        {
+            $judge_cond ='';
+        } else {
+            $judge_cond = " AND judgement = '" . $req->judgement . "'";
+        }
+
+        $data = DB::connection($this->mysql)->table('iqc_inspections_history')
+                    ->whereRaw(" 1=1 ".$item_cond.$lot_cond.$judge_cond.$from_cond.$to_cond)
+                    ->get();
+        return $data;
+    }
+
+    //REQUALIFICATION
+    public function getItemsRequalification()
+    {
+        $db = DB::connection($this->mysql)->table('iqc_inspections')
+                ->select('partcode as id','partcode as text')
+                ->where('judgement','Accepted')
+                ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                ->distinct()
+                ->get();
+        if ($this->checkIfExistObject($db) > 0) {
+            return $db;
+        }
+    }
+
+    public function getAppNoRequalification(Request $req)
+    {
+        $db = DB::connection($this->mysql)->table('iqc_inspections')
+                ->select('app_no as id','app_no as text')
+                ->where('judgement','Accepted')
+                ->where('partcode',$req->item)
+                ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                ->distinct()
+                ->get();
+
+        if ($this->checkIfExistObject($db) > 0) {
+            return $db;
+        }
+    }
+
+    public function getDetailsRequalification(Request $req)
+    {
+        $db = DB::connection($this->mysql)->table('iqc_inspections')
+                ->where('judgement','Accepted')
+                ->where('partcode',$req->item)
+                ->where('app_no',$req->app_no)
+                ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                ->select('partname','supplier','app_date','app_time','lot_qty')
+                ->distinct()
+                ->first();
+
+        $lots = DB::connection($this->mysql)->table('iqc_inspections')
+                ->where('judgement','Accepted')
+                ->where('partcode',$req->item)
+                ->where('app_no',$req->app_no)
+                ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                ->select('lot_no')
+                ->get();
+
+        if ($this->checkIfExistObject($db) > 0 || $this->checkIfExistObject($lots) > 0) {
+            $arr = [];
+            foreach ($lots as $key => $lot) {
+                $arr = explode(',',$lot->lot_no);
+            }
+            $lotnos = [];
+            $lotval = [];
+            foreach ($arr as $key => $x) {
+                $object = json_decode(json_encode(['id'=>$x,'text'=>$x]), FALSE);
+                array_push($lotnos,$object);
+                array_push($lotval,$x);
+            }
+            return $data = [
+                'details' => $db,
+                'lots' => $lotnos,
+                'lotval' => $lotval
+            ];
+        }
+    }
+
+    public function calculateLotQtyRequalification(Request $req)
+    {
+        $lot_qty = 0;
+        if (empty($req->lot_no)) {
+            return $lot_qty;
+        } else {
+            foreach ($req->lot_no as $key => $lot) {
+                $db = DB::connection($this->wbs)->table('tbl_wbs_inventory')
+                        ->select('qty as lot_qty')
+                        ->where('item',$req->item)
+                        ->where('wbs_mr_id',$req->app_no)
+                        ->where('lot_no',$lot)
+                        ->first();
+                if ($this->checkIfExistObject($db) > 0) {
+                    $lot_qty = $lot_qty + $db->lot_qty;
+                }
+            }
+            return $lot_qty;
+        }
+    }
+
+    public function visualInspectionRequalification(Request $req)
+    {
+        $db = DB::connection($this->mysql)->table('iqc_inspections')
+                ->where('judgement','Accepted')
+                ->where('partcode',$req->item)
+                ->where('app_no',$req->app_no)
+                ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                ->get();
+
+        if ($this->checkIfExistObject($db) > 0) {
+            return $db;
+        }
+    }
+
+    public function saveRequalification(Request $req)
+    {
+        $data = [
+            'return_status' => 'failed',
+            'msg' => "Saving Failed."
+        ];
+        $query = false;
+        $status = 0;
+        $kitting = 0;
+
+        if ($req->judgement == 'Accepted') {
+            $status = 1;
+            $kitting = 1;
+        } else {
+            $status = 2;
+            $kitting = 0;
+        }
+
+        if ($req->save_status == 'ADD') {
+            DB::connection($this->mysql)->table('iqc_inspections_rq')
+                ->insert([
+                    'ctrl_no_rq' => $req->ctrlno,
+                    'partcode_rq' => $req->partcode,
+                    'partname_rq' => $req->partname,
+                    'supplier_rq' => $req->supplier,
+                    'app_date_rq' => $req->app_date,
+                    'app_time_rq' => $req->app_time,
+                    'app_no_rq' => $req->app_no,
+                    'lot_no_rq' =>$req->lot_no,
+                    'lot_qty_rq' => $req->lot_qty,
+                    'date_ispected_rq' => $req->date_inspected,
+                    'ww_rq' => $req->ww,
+                    'fy_rq' => $req->fy,
+                    'shift_rq' => $req->shift,
+                    'time_ins_from_rq' => $req->time_ins_from,
+                    'time_ins_to_rq' => $req->time_ins_to,
+                    'inspector_rq' => $req->inspector,
+                    'submission_rq' => $req->submission,
+                    'judgement_rq' => $req->judgement,
+                    'lot_inspected_rq' => $req->lot_inspected,
+                    'lot_accepted_rq' => $req->lot_accepted,
+                    'no_of_defects_rq' => $req->no_of_defects,
+                    'remarks_rq' => $req->remarks,
+                    'dbcon_rq' => Auth::user()->productline,
+                    'created_at' => Carbon::now(),
+                ]);
+            if (is_string($req->lot_no)) {
+                $lots = explode(',',$req->lot_no);
+                $this->requalifyInventory($req->app_no,$req->partcode,$lots);
+            } else {
+                $this->requalifyInventory($req->app_no,$req->partcode,$req->lot_no);
+            }
+
+            $query = true;
+
+        } else {
+            DB::connection($this->mysql)->table('iqc_inspections_rq')
+                ->where('id',$req->id)
+                ->update([
+                    'partcode_rq' => $req->partcode,
+                    'partname_rq' => $req->partname,
+                    'supplier_rq' => $req->supplier,
+                    'app_date_rq' => $req->app_date,
+                    'app_time_rq' => $req->app_time,
+                    'app_no_rq' => $req->app_no,
+                    'lot_no_rq' => $req->lot_no,
+                    'lot_qty_rq' => $req->lot_qty,
+                    'date_ispected_rq' => $req->date_inspected,
+                    'ww_rq' => $req->ww,
+                    'fy_rq' => $req->fy,
+                    'shift_rq' => $req->shift,
+                    'time_ins_from_rq' => $req->time_ins_from,
+                    'time_ins_to_rq' => $req->time_ins_to,
+                    'inspector_rq' => $req->inspector,
+                    'submission_rq' => $req->submission,
+                    'judgement_rq' => $req->judgement,
+                    'lot_inspected_rq' => $req->lot_inspected,
+                    'lot_accepted_rq' => $req->lot_accepted,
+                    'no_of_defects_rq' => $req->no_of_defects,
+                    'remarks_rq' => $req->remarks,
+                    'dbcon_rq' => Auth::user()->productline,
+                    'updated_at' => Carbon::now(),
+                ]);
+
+                if (is_string($req->lot_no)) {
+                    $lots = explode(',',$req->lot_no);
+                    $this->requalifyInventory($req->app_no,$req->partcode,$lots);
+                } else {
+                    $this->requalifyInventory($req->app_no,$req->partcode,$req->lot_no);
+                }
+
+            $query = true;
+        }
+
+        if ($query) {
+            $data = [
+                'return_status' => 'success',
+                'msg' => "Successfully Saved."
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getRequaliData(Request $req)
+    {
+        return DB::connection($this->mysql)->table('iqc_inspections_rq')
+                    ->take($req->row)
+                    ->get();
+    }
+
+    public function deleteRequalification(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "Re-qualified data deleting failed."
+        ];
+
+        $query = false;
+
+        foreach ($req->id as $key => $id) {
+            $delete = DB::connection($this->mysql)->table('iqc_inspections_rq')
+                        ->where('id',$id)
+                        ->delete();
+            if ($delete == true) {
+                $query = true;
+            }
+        }
+
+
+        if ($query == true) {
+            $data = [
+                'return_status' => "success",
+                "msg" => "Re-qualified data successfully deleted."
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getmodeOfDefectsRequaliData(Request $req)
+    {
+        $db = DB::connection($this->mysql)->table('tbl_mod_iqc_rq')
+                ->where('partcode',$req->item)
+                ->get();
+        if ($this->checkIfExistObject($db) > 0) {
+            return $db;
+        }
+    }
+
+    public function saveModRequalification(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "Mode of Defect saving failed."
+        ];
+
+        if ($req->status == 'ADD') {
+            $query = DB::connection($this->mysql)->table('tbl_mod_iqc_rq')
+                        ->insert([
+                            'partcode' => $req->item,
+                            'mod' => $req->mod,
+                            'qty' => $req->qty,
+                            'created_at' => Carbon::now(),
+                        ]);
+        } else {
+            $query = DB::connection($this->mysql)->table('tbl_mod_iqc_rq')
+                        ->where('id',$req->id)
+                        ->update([
+                            'mod' => $req->mod,
+                            'qty' => $req->qty,
+                            'updated_at' => Carbon::now(),
+                        ]);
+        }
+
+
+        if ($query == true) {
+            $data = [
+                'return_status' => "success",
+                "msg" => "Mode of Defect successfully saved."
+            ];
+        }
+
+        return $data;
+    }
+
+    public function deleteModRequalification(Request $req)
+    {
+        $data = [
+            'return_status' => "failed",
+            "msg" => "Mode of Defect deleting failed."
+        ];
+
+        $query = false;
+
+        foreach ($req->id as $key => $id) {
+            $delete = DB::connection($this->mysql)->table('tbl_mod_iqc_rq')
+                        ->where('id',$id)
+                        ->delete();
+            if ($delete == true) {
+                $query = true;
+            }
+        }
+
+
+        if ($query == true) {
+            $data = [
+                'return_status' => "success",
+                "msg" => "Mode of Defect successfully deleted."
+            ];
+        }
+
+        return $data;
+    }
+
+    //GROUP BY
+    public function getGroupbyContent(Request $req)
+    {
+        if (!empty($req->field)) {
+            $db = DB::connection($this->mysql)->table('iqc_inspections')
+                    ->select($req->field.' as id',$req->field.' as text')
+                    ->whereRaw(DB::raw("(is_deleted is null or is_deleted = 0)"))
+                    ->distinct()
+                    ->get();
+            if ($this->checkIfExistObject($db) > 0) {
+                return $db;
+            }
+        }
+    }
+
+    public function getGroupByTable(Request $req)
+    {
+        return $this->IQCDatatableQuery($req,false);
+    }
+
+    public function getInspectionByDate(Request $req)
+    {
+        $date_inspected = '';
+
+        if (!empty($req->from) && !empty($req->to)) {
+            $date_inspected = "date_ispected BETWEEN '".$req->from."' AND '".$req->to."'";
+        }
+
+        $db = DB::connection($this->mysql)
+                ->select("SELECT *
+                        FROM iqc_inspections
+                        WHERE (is_deleted is null or is_deleted = 0) ".$date_inspected);
+
+        if ($this->checkIfExistObject($db) > 0) {
+            return $db;
+        }
+    }
+
+    private function IQCDatatableQuery($req,$join)
+    {
+        $g1 = ''; $g2 = ''; $g3 = '';
+        $g1c = ''; $g2c = ''; $g3c = '';
+        $date_inspected = '';
+        $groupBy = [];
+
+        // wheres
+        if (!empty($req->from) && !empty($req->to)) {
+            $date_inspected = "date_ispected BETWEEN '".$req->from."' AND '".$req->to."'";
+        }
+
+        if (!empty($req->field1) && !empty($req->content1)) {
+            $g1c = " AND ".$req->field1."='".$req->content1."'";
+        }
+
+        if (!empty($req->field2) && !empty($req->content2)) {
+            $g2c = " AND ".$req->field2."='".$req->content2."'";
+        }
+
+        if (!empty($req->field3) && !empty($req->content3)) {
+            $g3c = " AND ".$req->field3."='".$req->content3."'";
+        }
+
+        if (!empty($req->field1)) {
+            $g1 = $req->field1;
+            array_push($groupBy, $g1);
+        }
+
+        if (!empty($req->field2)) {
+            $g2 = $req->field2;
+            array_push($groupBy, $g2);
+        }
+
+        if (!empty($req->field3)) {
+            $g3 = $req->field3;
+            array_push($groupBy, $g3);
+        }
+
+        $grp = implode(',',$groupBy);
+        // $grby = substr($grp,0,-1);
+        
+        $grby = "";
+
+        if (count($groupBy) > 0) {
+            $grby = " GROUP BY ".$grp;
+        }
+        
+        if ($join == false) {
+            $db = DB::connection($this->mysql)
+                ->select("SELECT SUM(sample_size) AS sample_size,
+                                SUM(lot_qty) AS lot_qty,
+                                SUM(no_of_defects) AS no_of_defects,
+                                SUM(lot_accepted) AS lot_accepted,
+                                SUM(lot_inspected) AS lot_inspected,
+                                supplier, app_date, date_ispected, judgement,
+                                time_ins_from, time_ins_to, app_no, fy, ww, submission,
+                                partcode, partname, lot_no, aql
+                        FROM iqc_inspections
+                        WHERE (is_deleted is null or is_deleted = 0) ".$date_inspected.$g1c.$g2c.$g3c.$grby);
+        } else {
+
+            $db = DB::connection($this->mysql)
+                ->select("SELECT a.invoice_no,a.partcode,a.partname,a.supplier,a.app_date,
+                                a.app_time,a.app_no,a.lot_no,a.lot_qty,a.type_of_inspection,a.severity_of_inspection,
+                                a.inspection_lvl,a.aql,a.accept,a.reject,a.date_ispected,a.ww,a.fy,a.shift,
+                                a.time_ins_from,a.time_ins_to,a.inspector,a.submission,a.judgement,a.lot_inspected,
+                                a.lot_accepted,a.sample_size,a.no_of_defects,a.remarks,b.mod
+                        FROM iqc_inspections as a
+                        LEFT JOIN tbl_mod_iqc_inspection as b ON a.invoice_no = b.invoice_no
+                        WHERE (a.is_deleted is null or a.is_deleted = 0) ".$date_inspected.$g1c.$g2c.$g3c.$grby);
+        }
+        
+
+        if ($this->checkIfExistObject($db) > 0) {
+            return $db;
+        }
+    }
+
+    public function getIQCreport(Request $req)
+    {
+        $dt = Carbon::now();
+        $company_info = $this->com->getCompanyInfo();
+        $date = substr($dt->format('  M j, Y  h:i A '), 2);
+        $header = DB::connection($this->mysql)->table('iqc_inspection_group')
+                    ->select('invoice_no',
+                            'supplier',
+                            'app_no',
+                            'app_date',
+                            'app_time',
+                            'severity_of_inspection',
+                            'inspection_lvl',
+                            'type_of_inspection',
+                            'aql',
+                            'accept',
+                            'reject')
+                    ->groupBy('invoice_no',
+                            'supplier',
+                            'app_no',
+                            'app_date',
+                            'app_time',
+                            'severity_of_inspection',
+                            'inspection_lvl',
+                            'type_of_inspection',
+                            'aql',
+                            'accept',
+                            'reject')
+                    ->get();
+
+        $details = DB::connection($this->mysql)->table('iqc_inspection_group')->get();
+
+        $data = [
+            'company_info' => $company_info,
+            'header' => $header,
+            'details' => $details,
+            'date' => $date,
+        ];
+
+        $pdf = PDF::loadView('pdf.iqc', $data)
+                    ->setPaper('A4')
+                    ->setOption('margin-top', 10)
+                    ->setOption('margin-bottom', 5)
+                    ->setOption('margin-left', 1)
+                    ->setOption('margin-right', 1)
+                    ->setOrientation('landscape');
+
+        return $pdf->inline('IQC_Inspection_'.Carbon::now());
+    }
+
+    public function getIQCreportexcel()
+    {
+        try
+        {
+            $dt = Carbon::now();
+            $date = substr($dt->format('Ymd'), 2);
+
+            Excel::create('IQC_Inspection_Report'.$date, function($excel)
+            {
+                $excel->sheet('Sheet1', function($sheet)
+                {
+                        $sheet->setFreeze('A7');
+                        $sheet->setWidth('A', 5);
+
+                        $details = DB::connection($this->mysql)->table('iqc_inspection_group')->get();
+
+                        $dt = Carbon::now();
+                        $com_info = $this->com->getCompanyInfo();
+
+                        $date = substr($dt->format('  M j, Y  h:i A '), 2);
+
+                        $sheet->setHeight(1, 15);
+                        $sheet->mergeCells('A1:AE1');
+                        $sheet->cells('A1:AE1', function($cells) {
+                            $cells->setAlignment('center');
+                        });
+                        $sheet->cell('A1',$com_info['name']);
+
+                        $sheet->setHeight(2, 15);
+                        $sheet->mergeCells('A2:AE2');
+                        $sheet->cells('A2:AE2', function($cells) {
+                            $cells->setAlignment('center');
+                        });
+                        $sheet->cell('A2',$com_info['address']);
+
+                        $sheet->setHeight(4, 20);
+                        $sheet->mergeCells('A4:AE4');
+                        $sheet->cells('A4:AE4', function($cells) {
+                            $cells->setAlignment('center');
+                            $cells->setFont([
+                                'family'     => 'Calibri',
+                                'size'       => '14',
+                                'bold'       =>  true,
+                                'underline'  =>  true
+                            ]);
+                        });
+                        $sheet->cell('A4',"IQC INSPECTION SUMMARY");
+
+                        $sheet->setHeight(6, 20);
+                        $sheet->cells('B6:AE6', function($cells) {
+                            $cells->setBorder('thick','thick','thick','thick');
+                            $cells->setFont([
+                                'family'     => 'Calibri',
+                                'size'       => '11',
+                                'bold'       =>  true,
+                            ]);
+                        });
+
+
+
+                        $sheet->cell('B6',"Invoice No.");
+                        $sheet->cell('C6',"Part Code");
+                        $sheet->cell('D6',"Part Name");
+                        $sheet->cell('E6',"Supplier");
+                        $sheet->cell('F6',"App. Date");
+                        $sheet->cell('G6',"App. Time");
+                        $sheet->cell('H6',"App. No.");
+                        $sheet->cell('I6',"Lot No.");
+                        $sheet->cell('J6',"Lot Qty.");
+                        $sheet->cell('K6',"Type of Inspection");
+                        $sheet->cell('L6',"Severity of Inspection");
+                        $sheet->cell('M6',"Inspection Level");
+                        $sheet->cell('N6',"AQL");
+                        $sheet->cell('O6',"Accept");
+                        $sheet->cell('P6',"Reject");
+                        $sheet->cell('Q6',"Date Inspected");
+                        $sheet->cell('R6',"WW");
+                        $sheet->cell('S6',"FY");
+                        $sheet->cell('T6',"Shift");
+                        $sheet->cell('U6',"Inspected From");
+                        $sheet->cell('V6',"Inspected To");
+                        $sheet->cell('W6',"Inspector");
+                        $sheet->cell('X6',"Submission");
+                        $sheet->cell('Y6',"Judgement");
+                        $sheet->cell('Z6',"Lot Inspected");
+                        $sheet->cell('AA6',"Lot Accepted");
+                        $sheet->cell('AB6',"Sample Size");
+                        $sheet->cell('AC6',"No. of Defects");
+                        $sheet->cell('AD6',"Remarks");
+                        $sheet->cell('AE6',"Classification");
+
+                        $row = 7;
+
+                        $sheet->setHeight(7, 20);
+
+                        $lot_qty = 0;
+                        $po_qty = 0;
+                        $balance = 0;
+
+                        foreach ($details as $key => $qc) {
+
+                            $sheet->cells('B'.$row.':AE'.$row, function($cells) {
+                                $cells->setFont([
+                                    'family'     => 'Calibri',
+                                    'size'       => '11',
+                                ]);
+                            });
+                            $sheet->cell('B'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->invoice_no);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('C'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->partcode);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('D'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->partname);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('E'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->supplier);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('F'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->app_date);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('G'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->app_time);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('H'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->app_no);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('I'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->lot_no);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('J'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->lot_qty);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('K'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->type_of_inspection);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('L'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->severity_of_inspection);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('M'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->inspection_lvl);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('N'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->aql);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('O'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->accept);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('P'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->reject);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('Q'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->date_ispected);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('R'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->ww);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('S'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->fy);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('T'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->shift);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('U'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->time_ins_from);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('V'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->time_ins_to);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('W'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->inspector);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('X'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->submission);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('Y'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->judgement);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('Z'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->lot_inspected);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('AA'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->lot_accepted);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('AB'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->sample_size);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('AC'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->no_of_defects);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('AD'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->remarks);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+
+                            $sheet->cell('AE'.$row, function($cell) use($qc) {
+                                $cell->setValue($qc->classification);
+                                $cell->setBorder('thin','thin','thin','thin');
+                            });
+                            $row++;
+                        }
+
+                });
+
+            })->download('xls');
+        } catch (Exception $e) {
+            return redirect(url('/iqcinspection'))->with(['err_message' => $e]);
+        }
+    }
+
+    public function uploadfiles(Request $req)
+    {
+        $inspection_data = $req->file('inspection_data');
+        $inspection_mod = $req->file('inspection_mod');
+        $requali_data = $req->file('requali_data');
+        $requali_mod = $req->file('requali_mod');
+
+        $data = [
+            'return_status' => 'failed',
+            'msg' => 'Upload was unsuccessful.'
+        ];
+
+        $process = false;
+
+        if (isset($inspection_data)) {
+            $this->uploadInspection($inspection_data);
+            $process = true;
+        }
+
+        if (isset($inspection_mod)) {
+            $this->uploadInspectionMod($inspection_mod);
+            $process = true;
+        }
+
+        if (isset($requali_data)) {
+            $process = true;
+        }
+
+        if (isset($requali_mod)) {
+            $process = true;
+        }
+
+        if ($process == true) {
+            $data = [
+                'return_status' => 'success',
+                'msg' => 'Data were successfully uploaded.'
+            ];
+        }
+
+        return $data;
+    }
+
+    private function uploadInsepectionInsert($field)
+    {
+        $status = 0;
+        $kitting = 0;
+
+        if ($field['judgement'] == 'Accepted') {
+            $status = 1;
+            $kitting = 1;
+        } else {
+            $status = 2;
+            $kitting = 0;
+        }
+
+        $lot_qty = $this->getLotQty($field['invoice_no'],$field['partcode'],$field['lot_no']);
+        
+        DB::connection($this->mysql)->table('iqc_inspections')
+            ->insert([
+                'invoice_no' => $field['invoice_no'],
+                'partcode' => $field['partcode'],
+                'partname' => $field['partname'],
+                'supplier' => $field['supplier'],
+                'app_date' => $field['app_date'],
+                'app_time' => $field['app_time'],
+                'app_no' => $field['app_no'],
+                'lot_no' => $field['lot_no'],
+                'lot_qty' => $lot_qty,
+                'type_of_inspection' => $field['type_of_inspection'],
+                'severity_of_inspection' => $field['severity_of_inspection'],
+                'inspection_lvl' => $field['inspection_lvl'],
+                'aql' => $field['aql'],
+                'accept' => $field['accept'],
+                'reject' => $field['reject'],
+                'date_ispected' => $field['date_inspected'],
+                'ww' => $field['ww'],
+                'fy' => $field['fy'],
+                'shift' => $field['shift'],
+                'time_ins_from' => $field['time_inspection_from'],
+                'time_ins_to' => $field['time_inspection_to'],
+                'inspector' => $field['inspector'],
+                'submission' => $field['submission'],
+                'judgement' => $field['judgement'],
+                'lot_inspected' => $field['lot_inspected'],
+                'lot_accepted' => $field['lot_accepted'],
+                'sample_size' => $field['sample_size'],
+                'no_of_defects' => $field['no_of_defects'],
+                'remarks' => $field['remarks'],
+                'dbcon' => Auth::user()->productline,
+                'created_at' => Carbon::now(),
+            ]);
+
+        DB::connection($this->mysql)->table('iqc_inspections_history')
+                ->insert([
+                    'invoice_no' => $field['invoice_no'],
+                    'partcode' => $field['partcode'],
+                    'partname' => $field['partname'],
+                    'supplier' => $field['supplier'],
+                    'app_date' => $field['app_date'],
+                    'app_time' => $field['app_time'],
+                    'app_no' => $field['app_no'],
+                    'lot_no' => $field['lot_no'],
+                    'lot_qty' => $lot_qty,
+                    'type_of_inspection' => $field['type_of_inspection'],
+                    'severity_of_inspection' => $field['severity_of_inspection'],
+                    'inspection_lvl' => $field['inspection_lvl'],
+                    'aql' => $field['aql'],
+                    'accept' => $field['accept'],
+                    'reject' => $field['reject'],
+                    'date_ispected' => $field['date_inspected'],
+                    'ww' => $field['ww'],
+                    'fy' => $field['fy'],
+                    'shift' => $field['shift'],
+                    'time_ins_from' => $field['time_inspection_from'],
+                    'time_ins_to' => $field['time_inspection_to'],
+                    'inspector' => $field['inspector'],
+                    'submission' => $field['submission'],
+                    'judgement' => $field['judgement'],
+                    'lot_inspected' => $field['lot_inspected'],
+                    'lot_accepted' => $field['lot_accepted'],
+                    'sample_size' => $field['sample_size'],
+                    'no_of_defects' => $field['no_of_defects'],
+                    'remarks' => $field['remarks'],
+                    'dbcon' => Auth::user()->productline,
+                    'created_at' => Carbon::now(),
+                ]);
+
+        DB::connection($this->wbs)->table('tbl_wbs_material_receiving_batch')
+            ->where('invoice_no', $field['invoice_no'])
+            ->where('wbs_mr_id', $field['app_no'])
+            ->where('item', $field['partcode'])
+            ->where('lot_no', $field['lot_no'])
+            ->update([
+                'iqc_status' => $status,
+                'for_kitting' => $kitting,
+                'iqc_result' => $field['remarks']
+            ]);
+
+        DB::connection($this->wbs)->table('tbl_wbs_inventory')
+            ->where('invoice_no', $field['invoice_no'])
+            ->where('wbs_mr_id', $field['app_no'])
+            ->where('item', $field['partcode'])
+            ->where('lot_no', $field['lot_no'])
+            ->update([
+                'iqc_status' => $status,
+                'for_kitting' => $kitting,
+                'iqc_result' => $field['remarks']
+            ]);
+    }
+
+    private function uploadInspection($inspection_data)
+    {
+        Excel::load($inspection_data, function($reader) {
+
+            $results = $reader->get();
+            $fields = $results->toArray();
+
+            foreach ($fields as $key => $field) {
+                if ($this->ItemInspectionExists($field['invoice_no'],$field['partcode'],$field['lot_no']) < 1) {
+                    $this->uploadInsepectionInsert($field);
+                }
+            }
+        });
+    }
+
+    private function uploadInspectionMod($inspection_mod)
+    {
+        Excel::load($inspection_mod, function($reader) {
+
+            $results = $reader->get();
+            $fields = $results->toArray();
+
+            foreach ($fields as $key => $field) {
+                if ($this->ItemInspectionModExists($field['invoice_no'],$field['partcode'],$field['lot_no'],$field['mod']) < 1) {
+                    $this->insertInspectionMod($field);
+                } else {
+                    $this->updateInspectionMod($field);
+                }
+            }
+        });
+    }
+
+    private function insertInspectionMod($field)
+    {
+        DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+            ->insert([
+                'invoice_no' => $field['invoice_no'],
+                'partcode' => $field['partcode'],
+                'mod' => $field['mod'],
+                'qty' => $field['qty'],
+                'lot_no' => $field['lot_no'],
+                'created_at' => Carbon::now(),
+            ]);
+    }
+
+    private function updateInspectionMod($field)
+    {
+        $oldmod = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                    ->select('qty')
+                    ->where('invoice_no', $field['invoice_no'])
+                    ->where('partcode', $field['partcode'])
+                    ->where('mod', $field['mod'])
+                    ->where('lot_no', $field['lot_no'])
+                    ->first();
+
+        $newqty = $oldmod + $field['qty'];
+
+        DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+            ->where('invoice_no', $field['invoice_no'])
+            ->where('partcode', $field['partcode'])
+            ->where('mod', $field['mod'])
+            ->where('lot_no', $field['lot_no'])
+            ->update([
+                'qty' => $newqty,
+                'updated_at' => Carbon::now(),
+            ]);
+    }
+
+    private function uploadRequali($requali_data)
+    {
+        
+    }
+
+    private function uploadRequaliMod($requali_mod)
+    {
+        
+    }
+
+    private function ItemInspectionExists($invoiceno,$partcode,$lotno)
+    {
+        $cnt = DB::connection($this->mysql)->table('iqc_inspections')
+                    ->where('invoice_no',$invoiceno)
+                    ->where('partcode',$partcode)
+                    ->where('lot_no','like','%'.$lotno.'%')
+                    ->count();
+        return $cnt;
+    }
+
+    private function ItemInspectionModExists($invoiceno,$partcode,$lotno,$mod)
+    {
+        $cnt = DB::connection($this->mysql)->table('tbl_mod_iqc_inspection')
+                    ->where('invoice_no',$invoiceno)
+                    ->where('partcode',$partcode)
+                    ->where('lot_no',$lotno)
+                    ->where('mod',$mod)
+                    ->count();
+        return $cnt;
+    }
+
+    public function postSaveSortingData(Request $req) 
+    {
+        $data = [
+            'status' => 'failed',
+            'msg' => 'Saving Sorting data was failed.',
+            'sort_data' => []
+        ];
+
+        try {
+            $data_count = count($req->sorting_data);
+            $ok_count = 0;
+            $iqc_id = 0;
+
+            foreach ($req->sorting_data as $key => $sorting_data) {
+                if ($sorting_data['id'] == '' && $sorting_data['id'] == null) {
+                    $query = DB::connection($this->mysql)->table('iqc_disposition_sorting')
+                                ->insert([
+                                    'lot_no' => $sorting_data['lot_no'],
+                                    'total_qty' => $sorting_data['total_qty'],
+                                    'good_qty' => $sorting_data['good_qty'],
+                                    'ng_qty' => $sorting_data['ng_qty'],
+                                    'actual_qty' => $sorting_data['actual_qty'],
+                                    'remarks' => $sorting_data['remarks'],
+                                    'mr_id' => $sorting_data['mr_id'],
+                                    'inv_id' => $sorting_data['inv_id'],
+                                    'iqc_id' => $sorting_data['iqc_id'],
+                                    'category' => $sorting_data['category'],
+                                    'disposal_date' => $sorting_data['disposal_date'],
+                                    'disposal_slip_no' => $sorting_data['disposal_slip_no'],
+                                    'ngr_control_no' => $sorting_data['ngr_control_no'],
+                                    'packinglist_no' => $sorting_data['packinglist_no'],
+                                    'create_user' => Auth::user()->user_id,
+                                    'update_user' => Auth::user()->user_id,
+                                    'created_at' => date('Y-m-d H:i:s'),
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                    if ($query) {
+                        $ok_count++;
+                    }
+                } else {
+                    $query = DB::connection($this->mysql)->table('iqc_disposition_sorting')
+                                ->where('id', $sorting_data['id'])
+                                ->update([
+                                    'lot_no' => $sorting_data['lot_no'],
+                                    'total_qty' => $sorting_data['total_qty'],
+                                    'good_qty' => $sorting_data['good_qty'],
+                                    'ng_qty' => $sorting_data['ng_qty'],
+                                    'actual_qty' => $sorting_data['actual_qty'],
+                                    'remarks' => $sorting_data['remarks'],
+                                    'mr_id' => $sorting_data['mr_id'],
+                                    'inv_id' => $sorting_data['inv_id'],
+                                    'iqc_id' => $sorting_data['iqc_id'],
+                                    'category' => $sorting_data['category'],
+                                    'disposal_date' => $sorting_data['disposal_date'],
+                                    'disposal_slip_no' => $sorting_data['disposal_slip_no'],
+                                    'ngr_control_no' => $sorting_data['ngr_control_no'],
+                                    'packinglist_no' => $sorting_data['packinglist_no'],
+                                    'update_user' => Auth::user()->user_id,
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                    if ($query) {
+                        $ok_count++;
+                    }
+                }
+
+                $iqc_id = $sorting_data['iqc_id'];
+            }
+
+            if ($ok_count == $data_count) {
+                    $sort_data = DB::connection($this->mysql)->table('iqc_disposition_sorting')
+                                    ->where('iqc_id', $iqc_id)->get();
+                    $data = [
+                        'status' => 'success',
+                        'msg' => 'Saving Sorting data was successful.',
+                        'sort_data' => $sort_data
+                    ];
+                }
+        } catch (Exemption $e) {
+            $data = [
+                'status' => 'error',
+                'msg' => $e->getMessage(),
+                'sort_data' => []
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getSortingData(Request $req)
+    {
+        $query = "";
+        $sort_data = [];
+
+        try {
+            $query = "SELECT * FROM iqc_disposition_sorting WHERE iqc_id = ".$req->iqc_id;
+            $sort_data = DB::connection($this->mysql)->select($query);
+
+            return $sort_data;
+        } catch (Exemption $e) {
+            return [
+                    'status' => 'success',
+                    'msg' => 'Saving Sorting data was successful.',
+                    'sort_data' => $sort_data
+                ];
+        }
+        
+    }
+
+    public function postDeleteSortingData(Request $req)
+    {
+        $data = [
+            'status' => 'failed',
+            'msg' => 'Deleting Sorting data was failed.',
+            'sort_data' => []
+        ];
+
+        try {
+            $query = DB::connection($this->mysql)->table('iqc_disposition_sorting')
+                        ->whereIn('id', $req->ids)->delete();
+            if ($query) {
+                $sort_data = DB::connection($this->mysql)->table('iqc_disposition_sorting')
+                                ->where('iqc_id', $req->iqc_id)->get();
+                $data = [
+                    'status' => 'success',
+                    'msg' => 'Deleting Sorting data was successful.',
+                    'sort_data' => $sort_data
+                ];
+            }
+        } catch (Exemption $e) {
+            $data = [
+                'status' => 'error',
+                'msg' => $e->getMessage(),
+                'sort_data' => []
+            ];
+        }
+
+        return $data;
+    }
+
+    public function postSaveReworkData(Request $req) 
+    {
+        $data = [
+            'status' => 'failed',
+            'msg' => 'Saving Rework data was failed.',
+            'rework_data' => []
+        ];
+
+        try {
+            $data_count = count($req->rework_data);
+            $ok_count = 0;
+            $iqc_id = 0;
+
+            foreach ($req->rework_data as $key => $rework_data) {
+                if ($rework_data['id'] == '' && $rework_data['id'] == null) {
+                    $query = DB::connection($this->mysql)->table('iqc_disposition_rework')
+                                ->insert([
+                                    'lot_no' => $rework_data['lot_no'],
+                                    'total_qty' => $rework_data['total_qty'],
+                                    'good_qty' => $rework_data['good_qty'],
+                                    'ng_qty' => $rework_data['ng_qty'],
+                                    'actual_qty' => $rework_data['actual_qty'],
+                                    'remarks' => $rework_data['remarks'],
+                                    'mr_id' => $rework_data['mr_id'],
+                                    'inv_id' => $rework_data['inv_id'],
+                                    'iqc_id' => $rework_data['iqc_id'],
+                                    'category' => $rework_data['category'],
+                                    'disposal_date' => $rework_data['disposal_date'],
+                                    'disposal_slip_no' => $rework_data['disposal_slip_no'],
+                                    'ngr_control_no' => $rework_data['ngr_control_no'],
+                                    'packinglist_no' => $rework_data['packinglist_no'],
+                                    'create_user' => Auth::user()->user_id,
+                                    'update_user' => Auth::user()->user_id,
+                                    'created_at' => date('Y-m-d H:i:s'),
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                    if ($query) {
+                        $ok_count++;
+                    }
+                } else {
+                    $query = DB::connection($this->mysql)->table('iqc_disposition_rework')
+                                ->where('id', $rework_data['id'])
+                                ->update([
+                                    'lot_no' => $rework_data['lot_no'],
+                                    'total_qty' => $rework_data['total_qty'],
+                                    'good_qty' => $rework_data['good_qty'],
+                                    'ng_qty' => $rework_data['ng_qty'],
+                                    'actual_qty' => $rework_data['actual_qty'],
+                                    'remarks' => $rework_data['remarks'],
+                                    'mr_id' => $rework_data['mr_id'],
+                                    'inv_id' => $rework_data['inv_id'],
+                                    'iqc_id' => $rework_data['iqc_id'],
+                                    'category' => $rework_data['category'],
+                                    'disposal_date' => $rework_data['disposal_date'],
+                                    'disposal_slip_no' => $rework_data['disposal_slip_no'],
+                                    'ngr_control_no' => $rework_data['ngr_control_no'],
+                                    'packinglist_no' => $rework_data['packinglist_no'],
+                                    'update_user' => Auth::user()->user_id,
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                    if ($query) {
+                        $ok_count++;
+                    }
+                }
+
+                $iqc_id = $rework_data['iqc_id'];
+            }
+
+            if ($ok_count == $data_count) {
+                    $rework_data = DB::connection($this->mysql)->table('iqc_disposition_rework')
+                                    ->where('iqc_id', $iqc_id)->get();
+                    $data = [
+                        'status' => 'success',
+                        'msg' => 'Saving Rework data was successful.',
+                        'rework_data' => $rework_data
+                    ];
+                }
+        } catch (Exemption $e) {
+            $data = [
+                'status' => 'error',
+                'msg' => $e->getMessage(),
+                'rework_data' => []
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getReworkData(Request $req)
+    {
+        $query = "";
+        $rework_data = [];
+
+        try {
+            $query = "SELECT * FROM iqc_disposition_rework WHERE iqc_id = ".$req->iqc_id;
+            $rework_data = DB::connection($this->mysql)->select($query);
+
+            return $rework_data;
+        } catch (Exemption $e) {
+            return [
+                    'status' => 'success',
+                    'msg' => 'Saving Rework data was successful.',
+                    'rework_data' => $rework_data
+                ];
+        }
+        
+    }
+
+    public function postDeleteReworkData(Request $req)
+    {
+        $data = [
+            'status' => 'failed',
+            'msg' => 'Deleting Rework data was failed.',
+            'rework_data' => []
+        ];
+
+        try {
+            $query = DB::connection($this->mysql)->table('iqc_disposition_rework')
+                        ->whereIn('id', $req->ids)->delete();
+            if ($query) {
+                $rework_data = DB::connection($this->mysql)->table('iqc_disposition_rework')
+                                ->where('iqc_id', $req->iqc_id)->get();
+                $data = [
+                    'status' => 'success',
+                    'msg' => 'Deleting Rework data was successful.',
+                    'rework_data' => $rework_data
+                ];
+            }
+        } catch (Exemption $e) {
+            $data = [
+                'status' => 'error',
+                'msg' => $e->getMessage(),
+                'rework_data' => []
+            ];
+        }
+
+        return $data;
+    }
+
+
+    public function postSaveRTVData(Request $req) 
+    {
+        $data = [
+            'status' => 'failed',
+            'msg' => 'Saving RTV data was failed.',
+            'rtv_data' => []
+        ];
+
+        try {
+            $data_count = count($req->rtv_data);
+            $ok_count = 0;
+            $iqc_id = 0;
+
+            foreach ($req->rtv_data as $key => $rtv_data) {
+                if ($rtv_data['id'] == '' && $rtv_data['id'] == null) {
+                    $query = DB::connection($this->mysql)->table('iqc_disposition_rtv')
+                                ->insert([
+                                    'lot_no' => $rtv_data['lot_no'],
+                                    'total_qty' => $rtv_data['total_qty'],
+                                    'rtv_qty' => $rtv_data['rtv_qty'],
+                                    'category' => $rtv_data['category'],
+                                    'disposal_date' => $rtv_data['disposal_date'],
+                                    'disposal_slip_no' => $rtv_data['disposal_slip_no'],
+                                    'ngr_control_no' => $rtv_data['ngr_control_no'],
+                                    'packinglist_no' => $rtv_data['packinglist_no'],
+                                    'remarks' => $rtv_data['remarks'],
+                                    'mr_id' => $rtv_data['mr_id'],
+                                    'inv_id' => $rtv_data['inv_id'],
+                                    'iqc_id' => $rtv_data['iqc_id'],
+                                    'create_user' => Auth::user()->user_id,
+                                    'update_user' => Auth::user()->user_id,
+                                    'created_at' => date('Y-m-d H:i:s'),
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                    if ($query) {
+                        $ok_count++;
+                    }
+                } else {
+                    $query = DB::connection($this->mysql)->table('iqc_disposition_rtv')
+                                ->where('id', $rtv_data['id'])
+                                ->update([
+                                    'lot_no' => $rtv_data['lot_no'],
+                                    'total_qty' => $rtv_data['total_qty'],
+                                    'rtv_qty' => $rtv_data['rtv_qty'],
+                                    'category' => $rtv_data['category'],
+                                    'disposal_date' => $rtv_data['disposal_date'],
+                                    'disposal_slip_no' => $rtv_data['disposal_slip_no'],
+                                    'ngr_control_no' => $rtv_data['ngr_control_no'],
+                                    'packinglist_no' => $rtv_data['packinglist_no'],
+                                    'remarks' => $rtv_data['remarks'],
+                                    'mr_id' => $rtv_data['mr_id'],
+                                    'inv_id' => $rtv_data['inv_id'],
+                                    'iqc_id' => $rtv_data['iqc_id'],
+                                    'update_user' => Auth::user()->user_id,
+                                    'updated_at' => date('Y-m-d H:i:s')
+                                ]);
+                    if ($query) {
+                        $ok_count++;
+                    }
+                }
+
+                $iqc_id = $rtv_data['iqc_id'];
+            }
+
+            if ($ok_count == $data_count) {
+                    $rtv_data = DB::connection($this->mysql)->table('iqc_disposition_rtv')
+                                    ->where('iqc_id', $iqc_id)->get();
+                    $data = [
+                        'status' => 'success',
+                        'msg' => 'Saving RTV data was successful.',
+                        'rtv_data' => $rtv_data
+                    ];
+                }
+        } catch (Exemption $e) {
+            $data = [
+                'status' => 'error',
+                'msg' => $e->getMessage(),
+                'rtv_data' => []
+            ];
+        }
+
+        return $data;
+    }
+
+    public function getRTVData(Request $req)
+    {
+        $query = "";
+        $rtv_data = [];
+
+        try {
+            $query = "SELECT * FROM iqc_disposition_rtv WHERE iqc_id = ".$req->iqc_id;
+            $rtv_data = DB::connection($this->mysql)->select($query);
+
+            return $rtv_data;
+        } catch (Exemption $e) {
+            return [
+                    'status' => 'success',
+                    'msg' => 'Saving RTV data was successful.',
+                    'rtv_data' => $rtv_data
+                ];
+        }
+        
+    }
+
+    public function postDeleteRTVData(Request $req)
+    {
+        $data = [
+            'status' => 'failed',
+            'msg' => 'Deleting RTV data was failed.',
+            'rtv_data' => []
+        ];
+
+        try {
+            $query = DB::connection($this->mysql)->table('iqc_disposition_rtv')
+                        ->whereIn('id', $req->ids)->delete();
+            if ($query) {
+                $rtv_data = DB::connection($this->mysql)->table('iqc_disposition_rtv')
+                                ->where('iqc_id', $req->iqc_id)->get();
+                $data = [
+                    'status' => 'success',
+                    'msg' => 'Deleting RTV data was successful.',
+                    'rtv_data' => $rtv_data
+                ];
+            }
+        } catch (Exemption $e) {
+            $data = [
+                'status' => 'error',
+                'msg' => $e->getMessage(),
+                'rtv_data' => []
+            ];
+        }
+
+        return $data;
+    }
+}

@@ -1,0 +1,59 @@
+<?php
+
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\Migrations\Migration;
+
+class CreateIQCInspectionsTable extends Migration
+{
+    /**
+     * Run the migrations.
+     *
+     * @return void
+     */
+    public function up()
+    {
+        Schema::create('iqc_inspections', function (Blueprint $table) {
+            $table->increments('id');
+            $table->string('invoice_no');
+            $table->string('app_num');
+            $table->string('family');
+            $table->string('category');
+            $table->string('partcode');
+            $table->string('partname');
+            $table->string('supplier');
+            $table->string('lot_no');
+            $table->string('type_of_inspection');
+            $table->string('inspection_lvl');
+            $table->string('aql');
+            $table->integer('accept',false, true)->length(20);
+            $table->integer('reject',false, true)->length(20);
+            $table->date('date_inspected');
+            $table->string('ww_no');
+            $table->string('fy_no');
+            $table->string('shift');
+            $table->dateTime('time_inspected_from');
+            $table->dateTime('time_inspected_to');
+            $table->string('inspector');
+            $table->string('submission');
+            $table->string('judgement');
+            $table->integer('lot_qty',false, true)->length(20);
+            $table->string('lot_inspected');
+            $table->string('sample_size');
+            $table->integer('num_of_defectives',false, true)->length(20);
+            $table->string('remarks');
+            $table->string('month');
+            $table->string('dbcon');
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     *
+     * @return void
+     */
+    public function down()
+    {
+        Schema::drop('iqc_inspections');
+    }
+}
